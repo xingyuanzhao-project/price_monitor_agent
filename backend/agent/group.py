@@ -646,9 +646,10 @@ class AgentGroup:
         """Filter tool definitions to only those in group_config.tool_authorization.
 
         Description:
-            If tool_authorization is non-empty, only tools whose name appears
-            in the list are forwarded to sub-agents.  An empty authorization
-            list permits all supplied tools (no restriction).
+            Only tools whose name appears in the authorization list are
+            forwarded to sub-agents.  An empty authorization list means
+            no tools are permitted (deny-all default).  To grant all tools,
+            the caller must explicitly list them.
 
         Params:
             tool_definitions (Optional[list[dict]]): Full tool definition list
@@ -663,7 +664,7 @@ class AgentGroup:
 
         authorized_names = self.group_config.tool_authorization
         if not authorized_names:
-            return tool_definitions
+            return None
 
         filtered = [
             tool_def for tool_def in tool_definitions

@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Runtime data (generated at startup; contains API keys)
+data/
+
 # Python
 __pycache__/
 *.py[cod]

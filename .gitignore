@@ -3,7 +3,7 @@
 .env.*
 !.env.example
 
-# Runtime data (generated at startup; contains API keys)
+# Runtime data (generated at startup)
 data/
 
 # Python

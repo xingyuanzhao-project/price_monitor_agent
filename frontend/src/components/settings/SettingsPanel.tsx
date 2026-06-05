@@ -2,9 +2,10 @@
  * Settings page: LLM providers, API credentials, and global defaults.
  *
  * Loads user settings from the backend on mount. Provides CRUD forms for
- * LLM provider configs (name, base URL, masked API key, models list) and
- * API credentials (name, type, key-value fields). Global defaults section
- * covers temperature, max tokens, and rate limit RPM.
+ * LLM provider configs (name, base URL, env-var reference, models list)
+ * and API credentials (name, type, key-value fields). API keys are managed
+ * via a dedicated endpoint that writes to .env — they are never stored in
+ * the settings JSON.
  */
 
 import { useState, useEffect, useCallback } from "react";
@@ -13,6 +14,7 @@ import type {
   UserSettings,
   LLMProviderConfig,
   APICredential,
+  ProviderKeyStatus,
 } from "../../types/schema";
 
 const EMPTY_SETTINGS: UserSettings = {
@@ -27,12 +29,17 @@ const EMPTY_SETTINGS: UserSettings = {
 
 export default function SettingsPanel() {
   const [settings, setSettings] = useState<UserSettings>(EMPTY_SETTINGS);
+  const [keyStatus, setKeyStatus] = useState<ProviderKeyStatus[]>([]);
   const [saving, setSaving] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
   const loadSettings = useCallback(async () => {
-    const data = await settingsApi.get();
+    const [data, status] = await Promise.all([
+      settingsApi.get(),
+      settingsApi.providerStatus(),
+    ]);
     setSettings(data);
+    setKeyStatus(status);
     setLoaded(true);
   }, []);
 
@@ -71,7 +78,7 @@ export default function SettingsPanel() {
       ...prev,
       llm_providers: [
         ...prev.llm_providers,
-        { provider_name: "", base_url: "", api_key: "", available_models: [] },
+        { provider_name: "", base_url: "", api_key_env: "", available_models: [] },
       ],
     }));
   }, []);
@@ -81,6 +88,10 @@ export default function SettingsPanel() {
       ...prev,
       llm_providers: prev.llm_providers.filter((_, i) => i !== index),
     }));
+  }, []);
+
+  const handleApiKeySaved = useCallback((updated: ProviderKeyStatus[]) => {
+    setKeyStatus(updated);
   }, []);
 
   const updateCredential = useCallback(
@@ -135,8 +146,10 @@ export default function SettingsPanel() {
           <ProviderCard
             key={index}
             provider={provider}
+            status={keyStatus.find((s) => s.provider_name === provider.provider_name)}
             onChange={(updates) => updateProvider(index, updates)}
             onRemove={() => removeProvider(index)}
+            onApiKeySaved={handleApiKeySaved}
           />
         ))}
         <button className="btn btn-sm" onClick={addProvider}>
@@ -226,18 +239,32 @@ export default function SettingsPanel() {
 
 function ProviderCard({
   provider,
+  status,
   onChange,
   onRemove,
+  onApiKeySaved,
 }: {
   provider: LLMProviderConfig;
+  status?: ProviderKeyStatus;
   onChange: (updates: Partial<LLMProviderConfig>) => void;
   onRemove: () => void;
+  onApiKeySaved: (updated: ProviderKeyStatus[]) => void;
 }) {
   const [newModel, setNewModel] = useState("");
+  const [keyInput, setKeyInput] = useState("");
+  const [keySaving, setKeySaving] = useState(false);
 
-  const maskedKey = provider.api_key
-    ? provider.api_key.slice(0, 4) + "••••" + provider.api_key.slice(-4)
-    : "";
+  const handleSaveKey = useCallback(async () => {
+    if (!keyInput.trim() || !provider.provider_name) return;
+    setKeySaving(true);
+    try {
+      const updated = await settingsApi.setApiKey(provider.provider_name, keyInput.trim());
+      onApiKeySaved(updated);
+      setKeyInput("");
+    } finally {
+      setKeySaving(false);
+    }
+  }, [keyInput, provider.provider_name, onApiKeySaved]);
 
   return (
     <div className="provider-card">
@@ -257,7 +284,7 @@ function ProviderCard({
             className="form-input"
             value={provider.provider_name}
             onChange={(e) => onChange({ provider_name: e.target.value })}
-            placeholder="e.g. OpenRouter"
+            placeholder="e.g. openrouter"
           />
         </div>
         <div className="form-group">
@@ -266,22 +293,51 @@ function ProviderCard({
             className="form-input"
             value={provider.base_url}
             onChange={(e) => onChange({ base_url: e.target.value })}
-            placeholder="https://api.example.com/v1"
+            placeholder="https://openrouter.ai/api/v1"
           />
         </div>
       </div>
 
       <div className="form-group">
         <label className="form-label">
-          API Key {maskedKey && <span className="text-muted">({maskedKey})</span>}
+          Env Variable
+          <span className="text-muted" style={{ marginLeft: 6 }}>
+            ({provider.api_key_env || "not set"})
+          </span>
         </label>
         <input
           className="form-input"
-          type="password"
-          value={provider.api_key}
-          onChange={(e) => onChange({ api_key: e.target.value })}
-          placeholder="sk-..."
+          value={provider.api_key_env}
+          onChange={(e) => onChange({ api_key_env: e.target.value })}
+          placeholder="e.g. OPENROUTER_API_KEY"
         />
+      </div>
+
+      <div className="form-group">
+        <label className="form-label">
+          API Key{" "}
+          {status && (
+            <span style={{ color: status.configured ? "#22c55e" : "#ef4444", fontSize: 12 }}>
+              {status.configured ? `configured (${status.masked_key})` : "not set"}
+            </span>
+          )}
+        </label>
+        <div className="tag-input-row">
+          <input
+            className="form-input"
+            type="password"
+            value={keyInput}
+            onChange={(e) => setKeyInput(e.target.value)}
+            placeholder="Paste key to update — stored in .env, not in config"
+          />
+          <button
+            className="btn btn-sm"
+            onClick={handleSaveKey}
+            disabled={keySaving || !keyInput.trim() || !provider.provider_name}
+          >
+            {keySaving ? "Saving..." : "Set Key"}
+          </button>
+        </div>
       </div>
 
       <div className="form-group">

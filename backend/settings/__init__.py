@@ -18,5 +18,11 @@ How used by other modules:
     - The frontend calls persistence methods to save user-entered configuration.
 """
 
-from backend.settings.models import APICredential, LLMProviderConfig, UserSettings
+from backend.settings.models import (
+    PROVIDER_DEFAULT_ENV_VAR,
+    APICredential,
+    LLMProviderConfig,
+    UserSettings,
+    resolve_provider_api_key,
+)
 from backend.settings.persistence import SettingsPersistence

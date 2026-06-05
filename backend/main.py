@@ -17,7 +17,6 @@ How used by other modules:
 
 from __future__ import annotations
 
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
@@ -34,7 +33,7 @@ from backend.api import settings as settings_router
 from backend.orchestration.executor import WorkflowExecutor
 from backend.schema.persistence import SchemaPersistence
 from backend.schema.validation import SchemaValidator
-from backend.settings.models import LLMProviderConfig, UserSettings
+from backend.settings.models import PROVIDER_DEFAULT_ENV_VAR, LLMProviderConfig, UserSettings
 from backend.settings.persistence import SettingsPersistence
 from backend.tools.alert_dispatch import SendEmailTool, SendTelegramTool, SendWebhookTool
 from backend.tools.data_acquisition import FetchDataTool
@@ -61,10 +60,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan: initialise all backend components on startup.
 
     Performs the following in order:
-        1. Load ``.env`` and read ``OPENROUTER_API_KEY``.
+        1. Load ``.env`` so API keys are available in ``os.environ``.
         2. Create the ``schemas/`` directory and a SchemaPersistence.
         3. Create a SettingsPersistence; if no settings file exists yet,
-           seed default settings with an OpenRouter provider entry.
+           seed default settings with an OpenRouter provider entry
+           (referencing the ``OPENROUTER_API_KEY`` env var — the actual
+           secret is never written to settings JSON).
         4. Register all 15 tool instances in a ToolRegistry.
         5. Create a WorkflowExecutor.
         6. Wire every API router with its dependencies.
@@ -76,7 +77,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         Control back to the ASGI server for the application's lifetime.
     """
     load_dotenv()
-    openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
 
     # -- schema persistence -------------------------------------------------
     schemas_dir = Path("schemas")
@@ -97,7 +97,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 LLMProviderConfig(
                     provider_name="openrouter",
                     base_url="https://openrouter.ai/api/v1",
-                    api_key=openrouter_api_key,
+                    api_key_env=PROVIDER_DEFAULT_ENV_VAR["openrouter"],
                     available_models=[],
                 ),
             ],

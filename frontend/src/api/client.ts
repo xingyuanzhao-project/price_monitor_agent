@@ -9,6 +9,7 @@
 import type {
   WorkflowSchema,
   UserSettings,
+  ProviderKeyStatus,
   RunRecord,
   RunEvent,
 } from "../types/schema";
@@ -110,6 +111,17 @@ export const settingsApi = {
     return request("/settings", {
       method: "PUT",
       body: JSON.stringify(settings),
+    });
+  },
+
+  providerStatus(): Promise<ProviderKeyStatus[]> {
+    return request("/settings/provider-status");
+  },
+
+  setApiKey(providerName: string, apiKey: string): Promise<ProviderKeyStatus[]> {
+    return request("/settings/api-key", {
+      method: "POST",
+      body: JSON.stringify({ provider_name: providerName, api_key: apiKey }),
     });
   },
 };

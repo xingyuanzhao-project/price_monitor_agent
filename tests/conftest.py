@@ -68,12 +68,13 @@ def tool_registry() -> ToolRegistry:
 
 @pytest.fixture
 def user_settings(openrouter_api_key: str) -> UserSettings:
+    _ = openrouter_api_key  # ensure env var is present (skip otherwise)
     return UserSettings(
         llm_providers=[
             LLMProviderConfig(
                 provider_name="openrouter",
                 base_url="https://openrouter.ai/api/v1",
-                api_key=openrouter_api_key,
+                api_key_env="OPENROUTER_API_KEY",
                 available_models=[TEST_MODEL_ID],
             ),
         ],

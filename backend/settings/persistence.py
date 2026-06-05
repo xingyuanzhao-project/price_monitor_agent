@@ -1,12 +1,13 @@
 """
-JSON-based persistence for user settings.
+JSON-based persistence for user settings and ``.env`` key management.
 
 What it does:
     Provides file-system persistence for UserSettings objects using JSON
-    serialization. Supports save, load, and existence-check operations
-    against a configured settings file path.
+    serialization, plus a helper that writes environment-variable values
+    to the project-root ``.env`` file (the canonical store for API keys).
 
 Entities in it:
+    - persist_env_var_to_dotenv: Update or append a variable in ``.env``.
     - SettingsPersistence: Main class handling settings file I/O operations.
 
 How used by other modules:
@@ -15,12 +16,47 @@ How used by other modules:
       credentials and provider configs needed for workflow execution.
     - The initialization flow calls exists() to determine if first-run setup
       is needed.
+    - The settings API router calls persist_env_var_to_dotenv when the user
+      sets an API key via the GUI.
 """
 
 import json
 from pathlib import Path
 
 from backend.settings.models import UserSettings
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def persist_env_var_to_dotenv(var_name: str, var_value: str) -> None:
+    """Write or update a variable in the project-root ``.env`` file.
+
+    If the variable already exists its value is replaced in-place;
+    otherwise a new line is appended.
+
+    Args:
+        var_name: Environment variable name (e.g. ``OPENROUTER_API_KEY``).
+        var_value: The value to persist.
+    """
+    env_path = _PROJECT_ROOT / ".env"
+    lines: list[str] = []
+    found = False
+
+    if env_path.exists():
+        with env_path.open("r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith(f"{var_name}=") or stripped == var_name:
+                lines[idx] = f"{var_name}={var_value}\n"
+                found = True
+                break
+
+    if not found:
+        lines.append(f"{var_name}={var_value}\n")
+
+    with env_path.open("w", encoding="utf-8") as fh:
+        fh.writelines(lines)
 
 
 class SettingsPersistence:

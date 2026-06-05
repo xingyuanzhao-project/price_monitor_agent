@@ -93,8 +93,15 @@ export interface WorkflowSchema {
 export interface LLMProviderConfig {
   provider_name: string;
   base_url: string;
-  api_key: string;
+  api_key_env: string;
   available_models: string[];
+}
+
+export interface ProviderKeyStatus {
+  provider_name: string;
+  api_key_env: string;
+  configured: boolean;
+  masked_key: string;
 }
 
 export interface APICredential {

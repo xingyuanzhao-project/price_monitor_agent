@@ -22,6 +22,7 @@ from typing import Any
 from fastapi import APIRouter
 
 from backend.agent.llm_provider import LLMProvider, LLMProviderError
+from backend.settings.models import resolve_provider_api_key
 from backend.settings.persistence import SettingsPersistence
 from backend.tools.registry import ToolRegistry
 
@@ -72,9 +73,18 @@ async def list_models() -> dict[str, Any]:
         provider_info: dict[str, Any] = {
             "provider_name": config.provider_name,
         }
+        api_key = resolve_provider_api_key(config)
+        if not api_key:
+            provider_info["models"] = []
+            provider_info["error"] = (
+                f"Environment variable '{config.api_key_env}' is not set. "
+                f"Set it in .env or via the Settings > API Keys page."
+            )
+            providers.append(provider_info)
+            continue
         try:
             provider = LLMProvider(
-                api_key=config.api_key,
+                api_key=api_key,
                 model_id="",
                 base_url=config.base_url,
             )

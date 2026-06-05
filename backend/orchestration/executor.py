@@ -44,7 +44,7 @@ from backend.harness.execution import ExecutionHarness
 from backend.orchestration.scheduler import ExecutionPlan, ExecutionScheduler
 from backend.schema.models import LoggingLevel, NodeDefinition, NodeType, WorkflowSchema
 from backend.schema.validation import SchemaValidator, SchemaValidationError
-from backend.settings.models import UserSettings
+from backend.settings.models import UserSettings, resolve_provider_api_key
 from backend.tools.registry import ToolRegistry
 
 _LOGGER = logging.getLogger(__name__)
@@ -569,8 +569,17 @@ class WorkflowExecutor:
         """
         for provider_config in self.user_settings.llm_providers:
             if model_id in provider_config.available_models:
+                api_key = resolve_provider_api_key(provider_config)
+                if not api_key:
+                    raise AgentExecutionError(
+                        f"Environment variable '{provider_config.api_key_env}' "
+                        f"is not set for provider '{provider_config.provider_name}'. "
+                        f"Populate it in the .env file or export it before running.",
+                        node_id="executor",
+                        iterations_completed=0,
+                    )
                 return LLMProvider(
-                    api_key=provider_config.api_key,
+                    api_key=api_key,
                     model_id=model_id,
                     temperature=temperature,
                     max_tokens=max_tokens,

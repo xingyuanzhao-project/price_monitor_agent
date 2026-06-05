@@ -3,21 +3,35 @@ Pydantic data models for user settings, credentials, and LLM provider configurat
 
 What it does:
     Defines structured types for API credentials (keyed by name and type),
-    LLM provider connection details (endpoint, key, models), and a top-level
-    UserSettings container that aggregates all configuration with lookup methods.
+    LLM provider connection details (endpoint, env-var reference, models),
+    and a top-level UserSettings container that aggregates all configuration
+    with lookup methods.  LLM API keys are never stored in config — they
+    live in environment variables (typically loaded from ``.env``).
 
 Entities in it:
+    - PROVIDER_DEFAULT_ENV_VAR: Mapping from canonical provider name to env-var name.
     - APICredential: A named credential with a type classification and arbitrary fields.
     - LLMProviderConfig: Connection configuration for a single LLM provider.
     - UserSettings: Aggregated user settings with credentials, providers, and defaults.
+    - resolve_provider_api_key: Resolve a provider's API key from the environment.
 
 How used by other modules:
     - backend.tools.base injects credentials from UserSettings into tool instances.
     - backend.agent.llm_provider reads LLMProviderConfig to construct provider clients.
     - backend.settings.persistence serializes/deserializes UserSettings to/from JSON.
+    - backend.api.settings uses resolve_provider_api_key for runtime key look-up.
 """
 
+import os
+
 from pydantic import BaseModel, Field
+
+PROVIDER_DEFAULT_ENV_VAR: dict[str, str] = {
+    "openrouter": "OPENROUTER_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GOOGLE_API_KEY",
+}
 
 
 class APICredential(BaseModel):
@@ -44,20 +58,34 @@ class LLMProviderConfig(BaseModel):
     Connection configuration for a single LLM provider endpoint.
 
     Description:
-        Stores the endpoint URL, authentication key, and list of available
-        models for a specific LLM provider service.
+        Stores the endpoint URL, the name of the environment variable holding
+        the API key, and the list of available models.  The actual secret is
+        never persisted in config — it is resolved at runtime via
+        ``resolve_provider_api_key``.
 
     Attributes:
         provider_name: Unique name identifying this provider.
         base_url: Base URL endpoint for the provider's API.
-        api_key: Authentication key for the provider.
+        api_key_env: Name of the environment variable that holds the API key.
         available_models: List of model identifiers available from this provider.
     """
 
     provider_name: str = Field(description="Unique provider identifier name")
     base_url: str = Field(description="Provider API base URL")
-    api_key: str = Field(description="Provider authentication key")
+    api_key_env: str = Field(description="Environment variable name for the API key")
     available_models: list[str] = Field(description="Available model identifiers")
+
+
+def resolve_provider_api_key(provider: LLMProviderConfig) -> str:
+    """Read the provider's API key from ``os.environ``.
+
+    Args:
+        provider: The LLM provider config whose key to resolve.
+
+    Returns:
+        The API key string (may be empty if not set).
+    """
+    return os.environ.get(provider.api_key_env, "")
 
 
 class UserSettings(BaseModel):

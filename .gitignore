@@ -3,8 +3,9 @@
 .env.*
 !.env.example
 
-# Runtime data (generated at startup)
-data/
+# Runtime data (generated at startup) — track settings, ignore the rest
+data/*
+!data/settings.json
 
 # Python
 __pycache__/

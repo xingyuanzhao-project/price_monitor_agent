@@ -46,6 +46,7 @@ def init(persistence: SettingsPersistence) -> APIRouter:
 # ---------------------------------------------------------------------------
 
 @router.get("/")
+@router.get("")
 async def get_settings() -> UserSettings:
     """Return the current user settings.
 
@@ -56,6 +57,7 @@ async def get_settings() -> UserSettings:
 
 
 @router.put("/")
+@router.put("")
 async def update_settings(settings: UserSettings) -> UserSettings:
     """Replace the user settings wholesale.
 

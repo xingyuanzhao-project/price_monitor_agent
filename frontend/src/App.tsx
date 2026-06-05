@@ -59,7 +59,7 @@ export default function App() {
           <div
             className={`canvas-layout ${selectedNodeId ? "" : "no-selection"}`}
           >
-            <SchemaManager />
+            <SchemaManager onRunStart={() => setActiveTab("runs")} />
             <WorkflowCanvas />
             {selectedNodeId && <NodeConfigPanel />}
           </div>

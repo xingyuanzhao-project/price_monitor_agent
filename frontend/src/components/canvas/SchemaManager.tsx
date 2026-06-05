@@ -3,15 +3,20 @@
  *
  * Displays all saved schemas, allows creating, loading, saving, and deleting
  * schemas. When a schema is loaded, shows editable workflow-level configuration
- * (timeout, logging, tracing, dead loop detection).
+ * (timeout, logging, tracing, dead loop detection) and a Run button that
+ * starts execution and navigates to the Runs tab.
  */
 
 import { useState, useCallback } from "react";
 import { useWorkflowStore } from "../../store/workflowStore";
-import { schemasApi } from "../../api/client";
+import { schemasApi, runsApi } from "../../api/client";
 import { LoggingLevel } from "../../types/schema";
 
-export default function SchemaManager() {
+interface SchemaManagerProps {
+  onRunStart: () => void;
+}
+
+export default function SchemaManager({ onRunStart }: SchemaManagerProps) {
   const schemas = useWorkflowStore((storeState) => storeState.schemas);
   const schemaId = useWorkflowStore((storeState) => storeState.schemaId);
   const schemaName = useWorkflowStore((storeState) => storeState.schemaName);
@@ -29,26 +34,17 @@ export default function SchemaManager() {
   const [newName, setNewName] = useState("");
   const [newDescription, setNewDescription] = useState("");
   const [saving, setSaving] = useState(false);
+  const [launching, setLaunching] = useState(false);
 
   const refreshSchemas = useCallback(async () => {
-    try {
-      const list = await schemasApi.list();
-      setSchemas(list);
-    } catch {
-      /* Backend may be offline */
-    }
+    const list = await schemasApi.list();
+    setSchemas(list);
   }, [setSchemas]);
 
   const handleLoad = useCallback(
     async (targetSchemaId: string) => {
-      try {
-        const schema = await schemasApi.get(targetSchemaId);
-        setSchema(schema);
-      } catch (error) {
-        throw new Error(
-          `Failed to load schema ${targetSchemaId}: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
+      const schema = await schemasApi.get(targetSchemaId);
+      setSchema(schema);
     },
     [setSchema]
   );
@@ -68,18 +64,12 @@ export default function SchemaManager() {
         dead_loop_detection: true,
       },
     };
-    try {
-      const created = await schemasApi.create(schema);
-      setSchema(created);
-      await refreshSchemas();
-      setCreateMode(false);
-      setNewName("");
-      setNewDescription("");
-    } catch (error) {
-      throw new Error(
-        `Failed to create schema: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
+    const created = await schemasApi.create(schema);
+    setSchema(created);
+    await refreshSchemas();
+    setCreateMode(false);
+    setNewName("");
+    setNewDescription("");
   }, [newName, newDescription, setSchema, refreshSchemas]);
 
   const handleSave = useCallback(async () => {
@@ -89,10 +79,6 @@ export default function SchemaManager() {
       const workflowSchema = toWorkflowSchema();
       await schemasApi.update(schemaId, workflowSchema);
       await refreshSchemas();
-    } catch (error) {
-      throw new Error(
-        `Failed to save schema: ${error instanceof Error ? error.message : String(error)}`
-      );
     } finally {
       setSaving(false);
     }
@@ -100,18 +86,23 @@ export default function SchemaManager() {
 
   const handleDelete = useCallback(
     async (targetSchemaId: string) => {
-      try {
-        await schemasApi.delete(targetSchemaId);
-        if (schemaId === targetSchemaId) clearSchema();
-        await refreshSchemas();
-      } catch (error) {
-        throw new Error(
-          `Failed to delete schema: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
+      await schemasApi.delete(targetSchemaId);
+      if (schemaId === targetSchemaId) clearSchema();
+      await refreshSchemas();
     },
     [schemaId, clearSchema, refreshSchemas]
   );
+
+  const handleRun = useCallback(async () => {
+    if (!schemaId) return;
+    setLaunching(true);
+    try {
+      await runsApi.start(schemaId);
+      onRunStart();
+    } finally {
+      setLaunching(false);
+    }
+  }, [schemaId, onRunStart]);
 
   return (
     <div className="panel">
@@ -261,6 +252,16 @@ export default function SchemaManager() {
                 Dead Loop Detection
               </label>
             </div>
+
+            <hr className="divider" />
+            <button
+              className="btn btn-run"
+              onClick={handleRun}
+              disabled={launching}
+              style={{ width: "100%" }}
+            >
+              {launching ? "Launching..." : "Run Workflow"}
+            </button>
           </>
         )}
       </div>

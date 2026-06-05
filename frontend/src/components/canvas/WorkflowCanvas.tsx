@@ -47,14 +47,14 @@ const NODE_TYPE_LABELS: Record<NodeType, string> = {
 };
 
 export default function WorkflowCanvas() {
-  const nodes = useWorkflowStore((s) => s.nodes);
-  const edges = useWorkflowStore((s) => s.edges);
-  const setNodes = useWorkflowStore((s) => s.setNodes);
-  const setEdges = useWorkflowStore((s) => s.setEdges);
-  const addEdgeAction = useWorkflowStore((s) => s.addEdge);
-  const setSelectedNodeId = useWorkflowStore((s) => s.setSelectedNodeId);
-  const schemaId = useWorkflowStore((s) => s.schemaId);
-  const addNode = useWorkflowStore((s) => s.addNode);
+  const nodes = useWorkflowStore((storeState) => storeState.nodes);
+  const edges = useWorkflowStore((storeState) => storeState.edges);
+  const setNodes = useWorkflowStore((storeState) => storeState.setNodes);
+  const setEdges = useWorkflowStore((storeState) => storeState.setEdges);
+  const addEdgeAction = useWorkflowStore((storeState) => storeState.addEdge);
+  const setSelectedNodeId = useWorkflowStore((storeState) => storeState.setSelectedNodeId);
+  const schemaId = useWorkflowStore((storeState) => storeState.schemaId);
+  const addNode = useWorkflowStore((storeState) => storeState.addNode);
 
   const nodeTypes = useMemo(() => ({ agentNode: AgentNode }), []);
 

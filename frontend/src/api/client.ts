@@ -115,8 +115,11 @@ export const settingsApi = {
 };
 
 export const modelsApi = {
-  list(): Promise<string[]> {
-    return request("/models");
+  async list(): Promise<string[]> {
+    const data = await request<{
+      providers: Array<{ provider_name: string; models: string[]; error: string | null }>;
+    }>("/models");
+    return data.providers.flatMap((provider) => provider.models ?? []);
   },
 
   listTools(): Promise<string[]> {

@@ -77,7 +77,8 @@ class SchemaValidator:
             Runs all validation checks and raises SchemaValidationError if
             any issues are found. Checks include: node ID uniqueness, edge
             endpoint validity, edge type compatibility, tool node constraints,
-            cycle detection, unreachable nodes, and group config requirements.
+            cycle detection, unreachable nodes, group config requirements,
+            missing tool bindings, and data type mismatches.
 
         Params:
             schema (WorkflowSchema): The workflow schema to validate.
@@ -97,6 +98,8 @@ class SchemaValidator:
         self._check_cycles(schema, node_map, errors)
         self._check_unreachable_nodes(schema, node_map, errors)
         self._check_agent_group_config(schema, errors)
+        self._check_tool_bindings(schema, node_map, errors)
+        self._check_data_type_mismatches(schema, node_map, errors)
 
         if errors:
             raise SchemaValidationError(errors)
@@ -373,4 +376,103 @@ class SchemaValidator:
             if node.node_type == NodeType.AGENT_GROUP and node.group_config is None:
                 errors.append(
                     f"AGENT_GROUP node '{node.node_id}' is missing required group_config"
+                )
+
+    def _check_tool_bindings(
+        self, schema: WorkflowSchema, node_map: dict[str, "NodeType"], errors: list[str]
+    ) -> None:
+        """
+        Check that every tool name referenced in node configs has a TOOL_CALL edge.
+
+        Description:
+            For each AGENT or AGENT_GROUP node, checks that every tool name
+            listed in node.config.tools has a corresponding TOOL_CALL edge
+            targeting a TOOL node whose label matches the tool name.
+
+        Params:
+            schema (WorkflowSchema): The schema being validated.
+            node_map (dict[str, NodeType]): Known node IDs and their types.
+            errors (list[str]): Accumulator for error messages.
+
+        Returns:
+            None
+        """
+        # Build a map from agent node_id → set of tool names reachable via TOOL_CALL edges.
+        agent_to_tool_labels: dict[str, set[str]] = {
+            node.node_id: set()
+            for node in schema.nodes
+            if node.node_type in {NodeType.AGENT, NodeType.AGENT_GROUP}
+        }
+        tool_node_labels: dict[str, str] = {
+            node.node_id: node.label
+            for node in schema.nodes
+            if node.node_type == NodeType.TOOL
+        }
+
+        for edge in schema.edges:
+            if edge.edge_type == EdgeType.TOOL_CALL:
+                if (
+                    edge.source_node_id in agent_to_tool_labels
+                    and edge.target_node_id in tool_node_labels
+                ):
+                    agent_to_tool_labels[edge.source_node_id].add(
+                        tool_node_labels[edge.target_node_id]
+                    )
+
+        for node in schema.nodes:
+            if node.node_type not in {NodeType.AGENT, NodeType.AGENT_GROUP}:
+                continue
+            for required_tool_name in node.config.tools:
+                if required_tool_name not in agent_to_tool_labels.get(node.node_id, set()):
+                    errors.append(
+                        f"Node '{node.node_id}' references tool '{required_tool_name}' "
+                        f"in its config but has no TOOL_CALL edge to a TOOL node "
+                        f"with that label"
+                    )
+
+    def _check_data_type_mismatches(
+        self, schema: WorkflowSchema, node_map: dict[str, "NodeType"], errors: list[str]
+    ) -> None:
+        """
+        Detect data type mismatches on DATA_FLOW edges using response_format hints.
+
+        Description:
+            When a source node specifies a response_format and a target node
+            specifies expected input via agent_rules, checks whether the declared
+            output type of the source is compatible with what the target expects.
+            Reports a warning-level error when both nodes declare incompatible
+            response_format types.
+
+        Params:
+            schema (WorkflowSchema): The schema being validated.
+            node_map (dict[str, NodeType]): Known node IDs and their types.
+            errors (list[str]): Accumulator for error messages.
+
+        Returns:
+            None
+        """
+        node_by_id = {node.node_id: node for node in schema.nodes}
+
+        for edge in schema.edges:
+            if edge.edge_type != EdgeType.DATA_FLOW:
+                continue
+            source_node = node_by_id.get(edge.source_node_id)
+            target_node = node_by_id.get(edge.target_node_id)
+            if source_node is None or target_node is None:
+                continue
+
+            source_format = source_node.config.response_format
+            target_format = target_node.config.response_format
+
+            if source_format is None or target_format is None:
+                continue
+
+            source_type = source_format.get("type")
+            target_type = target_format.get("type")
+            if source_type and target_type and source_type != target_type:
+                errors.append(
+                    f"DATA_FLOW edge '{edge.edge_id}': source node "
+                    f"'{edge.source_node_id}' outputs response_format type "
+                    f"'{source_type}' but target node '{edge.target_node_id}' "
+                    f"expects '{target_type}' — potential data type mismatch"
                 )

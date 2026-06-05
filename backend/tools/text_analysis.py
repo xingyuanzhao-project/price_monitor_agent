@@ -34,11 +34,13 @@ from backend.tools.base import BaseTool, ToolExecutionError
 
 class ChunkTextTool(BaseTool):
     """
-    Splits text into overlapping chunks for downstream processing.
+    Splits text into overlapping chunks with deduplication and format normalization.
 
     Description:
         Divides input text into chunks of a specified size with configurable
-        overlap to preserve context at chunk boundaries.
+        overlap to preserve context at chunk boundaries.  Optionally deduplicates
+        chunks with identical normalized content and normalizes whitespace/encoding
+        across all chunks.
 
     Attributes:
         None specific beyond BaseTool.
@@ -80,7 +82,10 @@ class ChunkTextTool(BaseTool):
         Returns:
             str: Description string.
         """
-        return "Splits text into overlapping chunks of specified size for downstream processing."
+        return (
+            "Splits text into overlapping chunks of specified size with "
+            "optional deduplication and format normalization."
+        )
 
     @property
     def parameters_schema(self) -> dict:
@@ -88,7 +93,7 @@ class ChunkTextTool(BaseTool):
         JSON Schema for the execute() parameters.
 
         Description:
-            Defines text, chunk_size, and overlap parameters.
+            Defines text, chunk_size, overlap, deduplicate, and normalize parameters.
 
         Params:
             None
@@ -110,20 +115,34 @@ class ChunkTextTool(BaseTool):
                     "description": "Number of overlapping characters between chunks",
                     "default": 200,
                 },
+                "deduplicate": {
+                    "type": "boolean",
+                    "description": "Remove chunks with identical normalized content",
+                    "default": False,
+                },
+                "normalize_format": {
+                    "type": "boolean",
+                    "description": "Normalize whitespace and unicode in each chunk",
+                    "default": False,
+                },
             },
             "required": ["text"],
         }
 
     async def execute(self, **kwargs: Any) -> dict:
         """
-        Split text into overlapping chunks.
+        Split text into overlapping chunks with optional deduplication and normalization.
 
         Description:
             Divides the input text into chunks of chunk_size characters with
-            overlap characters repeated between consecutive chunks.
+            overlap characters repeated between consecutive chunks.  When
+            deduplicate is True, chunks whose normalized fingerprint has been
+            seen before are dropped.  When normalize_format is True, each chunk's
+            whitespace is collapsed and leading/trailing space removed.
 
         Params:
-            **kwargs (Any): Must include 'text'. Optional: 'chunk_size', 'overlap'.
+            **kwargs (Any): Must include 'text'. Optional: 'chunk_size', 'overlap',
+                'deduplicate', 'normalize_format'.
 
         Returns:
             dict: Dictionary with 'chunks' list and 'total_chunks' count.
@@ -137,6 +156,8 @@ class ChunkTextTool(BaseTool):
 
         chunk_size = kwargs.get("chunk_size", 1000)
         overlap = kwargs.get("overlap", 200)
+        deduplicate = kwargs.get("deduplicate", False)
+        normalize_format = kwargs.get("normalize_format", False)
 
         if chunk_size <= 0:
             raise ToolExecutionError(f"chunk_size must be positive, got {chunk_size}")
@@ -150,10 +171,22 @@ class ChunkTextTool(BaseTool):
         chunks = []
         start_position = 0
         step_size = chunk_size - overlap
+        seen_fingerprints: set[str] = set()
 
         while start_position < len(text):
             end_position = start_position + chunk_size
             chunk_content = text[start_position:end_position]
+
+            if normalize_format:
+                chunk_content = re.sub(r"\s+", " ", chunk_content).strip()
+
+            if deduplicate:
+                fingerprint = re.sub(r"\s+", "", chunk_content.lower())
+                if fingerprint in seen_fingerprints:
+                    start_position += step_size
+                    continue
+                seen_fingerprints.add(fingerprint)
+
             chunks.append({
                 "index": len(chunks),
                 "start": start_position,
@@ -440,9 +473,9 @@ class ExtractEntitiesTool(BaseTool):
         Extract entities, relationships, and claims from text.
 
         Description:
-            Identifies capitalized multi-word phrases as entities, verb
-            connections between entities as relationships, and sentences
-            with numeric values as claims.
+            Identifies named entities with type distinctions (TICKER, COMPANY,
+            PERSON, DATE, NUMBER), relationship pairs with attribution context,
+            and factual claims containing numeric values.
 
         Params:
             **kwargs (Any): Must include 'text'. Optional: 'entity_types'.
@@ -457,7 +490,9 @@ class ExtractEntitiesTool(BaseTool):
         if not text:
             raise ToolExecutionError("Cannot extract entities from empty text")
 
-        entities = self._extract_named_entities(text)
+        requested_types: list[str] = kwargs.get("entity_types", [])
+
+        entities = self._extract_named_entities(text, requested_types)
         relationships = self._extract_relationships(text, entities)
         claims = self._extract_claims(text)
 
@@ -467,68 +502,170 @@ class ExtractEntitiesTool(BaseTool):
             "claims": claims,
         }
 
-    def _extract_named_entities(self, text: str) -> list[dict]:
+    def _classify_entity_type(self, token: str) -> str:
         """
-        Extract named entities using capitalization patterns.
+        Classify a named entity token into a specific entity type.
 
         Description:
-            Finds sequences of capitalized words as potential named entities.
+            Applies pattern-based heuristics to determine whether the token
+            is a TICKER, NUMBER, DATE, COMPANY, or PERSON.
+
+        Params:
+            token (str): The extracted entity string.
+
+        Returns:
+            str: One of TICKER, NUMBER, DATE, COMPANY, PERSON.
+        """
+        # Ticker: all-caps 1-5 letter sequence, optionally preceded by $
+        if re.match(r"^\$?[A-Z]{1,5}$", token):
+            return "TICKER"
+        # Number with currency/percentage
+        if re.match(r"^\$?[\d,]+(?:\.\d+)?%?$", token):
+            return "NUMBER"
+        # Date patterns
+        if re.match(
+            r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}(?:,\s*\d{4})?",
+            token,
+        ) or re.match(r"\b\d{4}\b", token):
+            return "DATE"
+        # Company suffix indicators
+        if re.search(
+            r"\b(?:Inc|Corp|Ltd|LLC|Group|Holdings|Technologies|Capital|Partners|Fund)\b",
+            token,
+        ):
+            return "COMPANY"
+        # Single-word capitalized names are tentatively PERSON; multi-word may be either
+        words = token.split()
+        if len(words) <= 2:
+            return "PERSON"
+        return "COMPANY"
+
+    def _extract_named_entities(
+        self, text: str, requested_types: list[str]
+    ) -> list[dict]:
+        """
+        Extract named entities with type classification.
+
+        Description:
+            Finds ticker symbols, numbers, dates, and capitalized multi-word
+            phrases, classifying each by type (TICKER, NUMBER, DATE, COMPANY,
+            PERSON).  If requested_types is non-empty, only those types are
+            returned.
 
         Params:
             text (str): Input text to process.
+            requested_types (list[str]): Optional filter of types to return.
 
         Returns:
             list[dict]: List of entity dicts with 'name' and 'type' fields.
         """
-        entity_pattern = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b")
-        matches = entity_pattern.findall(text)
         seen_entities: set[str] = set()
-        entities = []
+        entities: list[dict] = []
 
-        for match in matches:
-            if match not in seen_entities and len(match) > 1:
-                seen_entities.add(match)
-                entities.append({"name": match, "type": "named_entity"})
+        # Extract ticker symbols (e.g. $AAPL or AAPL in finance context)
+        ticker_pattern = re.compile(r"\$[A-Z]{1,5}\b|\b[A-Z]{2,5}\b")
+        for match in ticker_pattern.finditer(text):
+            candidate = match.group()
+            if candidate not in seen_entities and len(candidate) >= 2:
+                entity_type = self._classify_entity_type(candidate)
+                seen_entities.add(candidate)
+                entities.append({"name": candidate, "type": entity_type})
+
+        # Extract multi-word capitalized phrases (companies, people, places)
+        phrase_pattern = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b")
+        for match in phrase_pattern.finditer(text):
+            candidate = match.group()
+            if candidate not in seen_entities:
+                seen_entities.add(candidate)
+                entity_type = self._classify_entity_type(candidate)
+                entities.append({"name": candidate, "type": entity_type})
+
+        # Extract date patterns
+        date_pattern = re.compile(
+            r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+            r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|"
+            r"Dec(?:ember)?)\s+\d{1,2}(?:,\s*\d{4})?\b",
+            re.IGNORECASE,
+        )
+        for match in date_pattern.finditer(text):
+            candidate = match.group()
+            if candidate not in seen_entities:
+                seen_entities.add(candidate)
+                entities.append({"name": candidate, "type": "DATE"})
+
+        if requested_types:
+            normalised_requested = {t.upper() for t in requested_types}
+            entities = [
+                entity for entity in entities
+                if entity["type"].upper() in normalised_requested
+            ]
 
         return entities
 
     def _extract_relationships(self, text: str, entities: list[dict]) -> list[dict]:
         """
-        Extract relationships between identified entities.
+        Extract relationships between entities with attribution context.
 
         Description:
-            Looks for entity pairs appearing in the same sentence connected
-            by verb phrases.
+            Finds entity pairs appearing in the same sentence and extracts
+            the verb phrase between them as the predicate.  When the sentence
+            contains attribution verbs (said, reported, announced, according),
+            the relationship is tagged as an attribution and the attributing
+            entity is identified.
 
         Params:
             text (str): Input text to process.
             entities (list[dict]): Previously extracted entities.
 
         Returns:
-            list[dict]: List of relationship dicts with 'subject', 'predicate', 'object'.
+            list[dict]: List of relationship dicts with 'subject', 'predicate',
+                'object', 'attribution', and optionally 'attributed_by'.
         """
+        attribution_verbs = {"said", "reported", "announced", "stated",
+                             "according", "disclosed", "claimed", "noted"}
         sentences = re.split(r"[.!?]+", text)
         entity_names = {entity["name"] for entity in entities}
-        relationships = []
+        relationships: list[dict] = []
 
         for sentence in sentences:
+            sentence = sentence.strip()
             entities_in_sentence = [name for name in entity_names if name in sentence]
-            if len(entities_in_sentence) >= 2:
-                for subject_index in range(len(entities_in_sentence)):
-                    for object_index in range(subject_index + 1, len(entities_in_sentence)):
-                        subject_entity = entities_in_sentence[subject_index]
-                        object_entity = entities_in_sentence[object_index]
-                        subject_position = sentence.find(subject_entity)
-                        object_position = sentence.find(object_entity)
-                        between_text = sentence[
-                            subject_position + len(subject_entity):object_position
-                        ].strip()
-                        if between_text:
-                            relationships.append({
-                                "subject": subject_entity,
-                                "predicate": between_text,
-                                "object": object_entity,
-                            })
+            if len(entities_in_sentence) < 2:
+                continue
+
+            sentence_tokens = set(re.split(r"\W+", sentence.lower()))
+            is_attribution = bool(attribution_verbs & sentence_tokens)
+
+            for subject_index in range(len(entities_in_sentence)):
+                for object_index in range(subject_index + 1, len(entities_in_sentence)):
+                    subject_entity = entities_in_sentence[subject_index]
+                    object_entity = entities_in_sentence[object_index]
+                    subject_position = sentence.find(subject_entity)
+                    object_position = sentence.find(object_entity)
+                    between_text = sentence[
+                        subject_position + len(subject_entity): object_position
+                    ].strip()
+                    if not between_text:
+                        continue
+
+                    relationship: dict[str, Any] = {
+                        "subject": subject_entity,
+                        "predicate": between_text,
+                        "object": object_entity,
+                        "is_attribution": is_attribution,
+                    }
+                    if is_attribution:
+                        # The entity appearing before an attribution verb is the source.
+                        attribution_match = re.search(
+                            r"(\w[\w\s]*)\s+(?:said|reported|announced|stated|"
+                            r"according to|disclosed|claimed|noted)",
+                            sentence,
+                            re.IGNORECASE,
+                        )
+                        if attribution_match:
+                            relationship["attributed_by"] = attribution_match.group(1).strip()
+
+                    relationships.append(relationship)
 
         return relationships
 
@@ -762,7 +899,7 @@ class ScoreTextTool(BaseTool):
         JSON Schema for the execute() parameters.
 
         Description:
-            Defines text, dimensions, and context parameters.
+            Defines text, dimensions, context, and entities parameters.
 
         Params:
             None
@@ -787,23 +924,32 @@ class ScoreTextTool(BaseTool):
                     "items": {"type": "string"},
                     "description": "Keywords for relevance scoring",
                 },
+                "entities": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Named entities to score sentiment for individually",
+                },
             },
             "required": ["text", "dimensions"],
         }
 
     async def execute(self, **kwargs: Any) -> dict:
         """
-        Score text on specified dimensions.
+        Score text on specified dimensions with optional per-entity sentiment.
 
         Description:
             Computes scores for each requested dimension and returns them
-            with the component analysis.
+            with the component analysis.  When 'entities' is provided and
+            'sentiment' is in dimensions, also computes a per-entity sentiment
+            score by scoring the sentences containing each entity.
 
         Params:
             **kwargs (Any): Must include 'text' and 'dimensions'.
+                Optional: 'relevance_keywords', 'entities'.
 
         Returns:
-            dict: Dictionary with scores for each requested dimension.
+            dict: Dictionary with 'scores' for each dimension and optionally
+                'entity_sentiments' mapping entity name to sentiment score.
 
         Raises:
             ToolExecutionError: If text is empty or dimensions is empty.
@@ -834,7 +980,59 @@ class ScoreTextTool(BaseTool):
                     f"Must be one of: sentiment, relevance, credibility"
                 )
 
-        return {"scores": scores}
+        result: dict[str, Any] = {"scores": scores}
+
+        # Per-entity sentiment: score the sentences that contain each entity.
+        entity_names: list[str] = kwargs.get("entities", [])
+        if entity_names and "sentiment" in dimensions:
+            result["entity_sentiments"] = self._score_per_entity_sentiment(
+                text, entity_names
+            )
+
+        return result
+
+    def _score_per_entity_sentiment(
+        self, text: str, entity_names: list[str]
+    ) -> dict[str, dict]:
+        """
+        Compute sentiment scores for the context sentences of named entities.
+
+        Description:
+            For each entity, locates all sentences in the text that mention
+            it and computes the sentiment score over those sentences' tokens.
+            Entities with no matching sentences receive a neutral score.
+
+        Params:
+            text (str): Full input text.
+            entity_names (list[str]): Named entities to score individually.
+
+        Returns:
+            dict[str, dict]: Mapping from entity name to its sentiment score dict.
+        """
+        sentences = [sentence.strip() for sentence in re.split(r"[.!?]+", text) if sentence.strip()]
+        entity_sentiments: dict[str, dict] = {}
+
+        for entity_name in entity_names:
+            entity_sentences = [
+                sentence for sentence in sentences
+                if entity_name.lower() in sentence.lower()
+            ]
+            if not entity_sentences:
+                entity_sentiments[entity_name] = {
+                    "value": 0.0,
+                    "positive_count": 0,
+                    "negative_count": 0,
+                    "sentence_count": 0,
+                }
+                continue
+
+            combined_entity_text = " ".join(entity_sentences)
+            entity_tokens = set(re.split(r"\W+", combined_entity_text.lower()))
+            sentiment_score = self._score_sentiment(entity_tokens)
+            sentiment_score["sentence_count"] = len(entity_sentences)
+            entity_sentiments[entity_name] = sentiment_score
+
+        return entity_sentiments
 
     def _score_sentiment(self, tokens: set[str]) -> dict:
         """
@@ -1101,23 +1299,93 @@ class SummarizeTextTool(BaseTool):
 
     def _summarize_multi_synthesis(self, texts: list[str], max_sentences: int) -> dict:
         """
-        Synthesize multiple texts into a unified summary.
+        Synthesize multiple texts into a unified summary with conflict reconciliation.
 
         Description:
-            Combines all texts, extracts key sentences, and deduplicates.
+            Computes per-document summaries, then identifies conflicting facts
+            (sentences with opposing numeric or sentiment signals across sources)
+            and notes them explicitly in the output.  Non-conflicting key sentences
+            are merged into the final summary.
 
         Params:
             texts (list[str]): Multiple texts to synthesize.
             max_sentences (int): Maximum sentences in summary.
 
         Returns:
-            dict: Dictionary with 'summary', 'mode', and 'source_count'.
+            dict: Dictionary with 'summary', 'mode', 'source_count', and 'conflicts'.
         """
-        combined_text = " ".join(texts)
-        single_summary = self._summarize_single(combined_text, max_sentences)
-        single_summary["mode"] = "multi_synthesis"
-        single_summary["source_count"] = len(texts)
-        return single_summary
+        # Extract key sentences per source.
+        per_source_sentences: list[list[str]] = []
+        for source_text in texts:
+            source_sentences = [
+                sentence.strip()
+                for sentence in re.split(r"[.!?]+", source_text)
+                if sentence.strip()
+            ]
+            per_source_sentences.append(source_sentences)
+
+        # Detect conflicts: sentences from different sources that share a numeric
+        # claim but with opposing direction words (up/down, positive/negative).
+        positive_direction_words = {"up", "rise", "increase", "surged", "gained", "above"}
+        negative_direction_words = {"down", "fall", "decline", "dropped", "lost", "below"}
+        numeric_pattern = re.compile(r"\d+[\d,.]*%?|\$[\d,.]+")
+        conflicts: list[dict] = []
+
+        if len(per_source_sentences) >= 2:
+            for source_index_a in range(len(per_source_sentences)):
+                for source_index_b in range(source_index_a + 1, len(per_source_sentences)):
+                    for sentence_a in per_source_sentences[source_index_a]:
+                        for sentence_b in per_source_sentences[source_index_b]:
+                            if not numeric_pattern.search(sentence_a):
+                                continue
+                            if not numeric_pattern.search(sentence_b):
+                                continue
+                            tokens_a = set(re.split(r"\W+", sentence_a.lower()))
+                            tokens_b = set(re.split(r"\W+", sentence_b.lower()))
+                            direction_a_positive = bool(tokens_a & positive_direction_words)
+                            direction_a_negative = bool(tokens_a & negative_direction_words)
+                            direction_b_positive = bool(tokens_b & positive_direction_words)
+                            direction_b_negative = bool(tokens_b & negative_direction_words)
+                            if (direction_a_positive and direction_b_negative) or (
+                                direction_a_negative and direction_b_positive
+                            ):
+                                conflicts.append({
+                                    "source_a": source_index_a,
+                                    "source_b": source_index_b,
+                                    "sentence_a": sentence_a,
+                                    "sentence_b": sentence_b,
+                                })
+
+        # Build combined summary from non-conflicting sentences.
+        conflicting_texts: set[str] = set()
+        for conflict in conflicts:
+            conflicting_texts.add(conflict["sentence_a"])
+            conflicting_texts.add(conflict["sentence_b"])
+
+        all_sentences: list[str] = []
+        for source_sentences in per_source_sentences:
+            for sentence in source_sentences:
+                if sentence not in conflicting_texts:
+                    all_sentences.append(sentence)
+
+        combined_text = ". ".join(all_sentences)
+        single_result = self._summarize_single(combined_text, max_sentences) if combined_text else {
+            "summary": "", "mode": "single", "sentence_count": 0
+        }
+
+        conflict_notes = [
+            f"Source {conflict['source_a']} vs Source {conflict['source_b']}: "
+            f"'{conflict['sentence_a'][:80]}' contradicts '{conflict['sentence_b'][:80]}'"
+            for conflict in conflicts[:5]
+        ]
+
+        return {
+            "summary": single_result["summary"],
+            "mode": "multi_synthesis",
+            "source_count": len(texts),
+            "conflicts": conflict_notes,
+            "conflict_count": len(conflicts),
+        }
 
     def _summarize_delta(self, text_before: str, text_after: str, max_sentences: int) -> dict:
         """
@@ -1217,7 +1485,8 @@ class CrossModalAlignmentTool(BaseTool):
         JSON Schema for the execute() parameters.
 
         Description:
-            Defines segments parameter as array of modal text objects.
+            Defines segments (modal texts) and structured_data (fetched data
+            points from data acquisition tools) parameters.
 
         Params:
             None
@@ -1240,25 +1509,35 @@ class CrossModalAlignmentTool(BaseTool):
                     },
                     "description": "Text segments from different modalities",
                 },
+                "structured_data": {
+                    "type": "object",
+                    "description": (
+                        "Structured data fetched by data acquisition tools to anchor "
+                        "text claims against (e.g. {'price': 150.5, 'volume': 1000000, "
+                        "'change_pct': -2.3})."
+                    ),
+                },
             },
             "required": ["segments"],
         }
 
     async def execute(self, **kwargs: Any) -> dict:
         """
-        Align information across modal text segments.
+        Align information across modal text segments and anchor claims to structured data.
 
         Description:
-            Tokenizes each segment, identifies overlapping vocabulary as
-            common themes, measures agreement/disagreement using sentiment
-            polarity comparison, and reports confidence based on theme overlap.
+            Tokenises each segment and identifies overlapping vocabulary as common
+            themes.  Measures agreement/disagreement using sentiment polarity.
+            When structured_data is provided, extracts numeric claims from text and
+            checks whether they correspond to the structured data values.
 
         Params:
             **kwargs (Any): Must include 'segments' list of {modality, text} objects.
+                Optional: 'structured_data' dict of field→value pairs.
 
         Returns:
             dict: Dictionary with 'common_themes', 'contradictions', 'confidence',
-                  and 'modality_summary'.
+                  'modality_summary', and 'anchored_claims'.
 
         Raises:
             ToolExecutionError: If segments is empty or has fewer than 2 entries.
@@ -1268,6 +1547,8 @@ class CrossModalAlignmentTool(BaseTool):
             raise ToolExecutionError(
                 "Cross-modal alignment requires at least 2 segments from different modalities"
             )
+
+        structured_data: dict[str, Any] = kwargs.get("structured_data") or {}
 
         modality_tokens: dict[str, set[str]] = {}
         modality_sentiments: dict[str, float] = {}
@@ -1298,7 +1579,10 @@ class CrossModalAlignmentTool(BaseTool):
         for token_set in all_token_sets[1:]:
             common_tokens = common_tokens & token_set
 
-        stopwords = {"the", "a", "an", "is", "are", "was", "were", "in", "on", "at", "to", "for", "of", "and", "or"}
+        stopwords = {
+            "the", "a", "an", "is", "are", "was", "were", "in", "on", "at", "to",
+            "for", "of", "and", "or",
+        }
         common_themes = sorted(common_tokens - stopwords)
 
         contradictions = []
@@ -1307,20 +1591,21 @@ class CrossModalAlignmentTool(BaseTool):
             for index_b in range(index_a + 1, len(modality_names)):
                 name_a = modality_names[index_a]
                 name_b = modality_names[index_b]
-                sentiment_diff = abs(modality_sentiments[name_a] - modality_sentiments[name_b])
-                if sentiment_diff > 0.5:
+                sentiment_difference = abs(modality_sentiments[name_a] - modality_sentiments[name_b])
+                if sentiment_difference > 0.5:
                     contradictions.append({
                         "modality_a": name_a,
                         "modality_b": name_b,
                         "sentiment_a": modality_sentiments[name_a],
                         "sentiment_b": modality_sentiments[name_b],
-                        "disagreement_level": sentiment_diff,
+                        "disagreement_level": sentiment_difference,
                     })
 
-        total_tokens_union = set()
+        total_tokens_union: set[str] = set()
         for token_set in all_token_sets:
             total_tokens_union |= token_set
-        overlap_ratio = len(common_tokens - stopwords) / max(len(total_tokens_union - stopwords), 1)
+        significant_common = common_tokens - stopwords
+        overlap_ratio = len(significant_common) / max(len(total_tokens_union - stopwords), 1)
         confidence = min(1.0, overlap_ratio * 5)
 
         modality_summary = {
@@ -1328,9 +1613,86 @@ class CrossModalAlignmentTool(BaseTool):
             for modality, tokens in modality_tokens.items()
         }
 
+        # Anchor numeric claims in text to structured data values.
+        anchored_claims = self._anchor_claims_to_structured_data(segments, structured_data)
+
         return {
             "common_themes": common_themes[:20],
             "contradictions": contradictions,
             "confidence": confidence,
             "modality_summary": modality_summary,
+            "anchored_claims": anchored_claims,
         }
+
+    def _anchor_claims_to_structured_data(
+        self,
+        segments: list[dict],
+        structured_data: dict[str, Any],
+    ) -> list[dict]:
+        """
+        Match numeric claims in text segments to structured data field values.
+
+        Description:
+            Extracts numeric values from each segment's text and checks whether
+            any structured_data field is numerically close to a claim value.
+            Returns a list of anchored claim dicts indicating which data field
+            each text claim corresponds to, whether they agree, and the delta.
+
+        Params:
+            segments (list[dict]): Text segments with modality and text fields.
+            structured_data (dict[str, Any]): Numeric field→value data points.
+
+        Returns:
+            list[dict]: Anchored claim dicts with 'claim', 'modality',
+                'matched_field', 'data_value', 'text_value', and 'agrees'.
+        """
+        if not structured_data:
+            return []
+
+        numeric_token_pattern = re.compile(r"\$?[\d,]+(?:\.\d+)?%?")
+        anchored_claims: list[dict] = []
+
+        for segment in segments:
+            modality = segment["modality"]
+            text = segment["text"]
+            numeric_matches = numeric_token_pattern.findall(text)
+
+            for raw_match in numeric_matches:
+                cleaned = raw_match.replace("$", "").replace(",", "").replace("%", "")
+                try:
+                    claim_value = float(cleaned)
+                except ValueError:
+                    continue
+
+                for field_name, field_value in structured_data.items():
+                    try:
+                        data_value = float(field_value)
+                    except (TypeError, ValueError):
+                        continue
+
+                    # Consider a match if within 5% relative tolerance.
+                    if data_value == 0:
+                        continue
+                    relative_delta = abs(claim_value - data_value) / abs(data_value)
+                    if relative_delta <= 0.05:
+                        anchored_claims.append({
+                            "claim": raw_match,
+                            "modality": modality,
+                            "matched_field": field_name,
+                            "data_value": data_value,
+                            "text_value": claim_value,
+                            "agrees": True,
+                            "relative_delta": relative_delta,
+                        })
+                    elif relative_delta <= 0.20:
+                        anchored_claims.append({
+                            "claim": raw_match,
+                            "modality": modality,
+                            "matched_field": field_name,
+                            "data_value": data_value,
+                            "text_value": claim_value,
+                            "agrees": False,
+                            "relative_delta": relative_delta,
+                        })
+
+        return anchored_claims

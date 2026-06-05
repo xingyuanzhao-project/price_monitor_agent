@@ -55,6 +55,7 @@ def init(
 # ---------------------------------------------------------------------------
 
 @router.get("/")
+@router.get("")
 async def list_models() -> dict[str, Any]:
     """List LLM models available from each configured provider.
 

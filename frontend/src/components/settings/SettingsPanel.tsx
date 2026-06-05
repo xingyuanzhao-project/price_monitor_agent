@@ -31,13 +31,9 @@ export default function SettingsPanel() {
   const [loaded, setLoaded] = useState(false);
 
   const loadSettings = useCallback(async () => {
-    try {
-      const data = await settingsApi.get();
-      setSettings(data);
-      setLoaded(true);
-    } catch {
-      setLoaded(true);
-    }
+    const data = await settingsApi.get();
+    setSettings(data);
+    setLoaded(true);
   }, []);
 
   useEffect(() => {
@@ -75,7 +71,7 @@ export default function SettingsPanel() {
       ...prev,
       llm_providers: [
         ...prev.llm_providers,
-        { provider_name: "", base_url: "", api_key: "", models: [] },
+        { provider_name: "", base_url: "", api_key: "", available_models: [] },
       ],
     }));
   }, []);
@@ -290,16 +286,18 @@ function ProviderCard({
 
       <div className="form-group">
         <label className="form-label">Models</label>
-        {provider.models.length > 0 && (
+        {provider.available_models.length > 0 && (
           <div className="tag-list">
-            {provider.models.map((model, i) => (
-              <span key={i} className="tag-item">
+            {provider.available_models.map((model: string, modelIndex: number) => (
+              <span key={modelIndex} className="tag-item">
                 {model}
                 <span
                   className="tag-remove"
                   onClick={() =>
                     onChange({
-                      models: provider.models.filter((_, j) => j !== i),
+                      available_models: provider.available_models.filter(
+                        (_: string, filterIndex: number) => filterIndex !== modelIndex
+                      ),
                     })
                   }
                 >
@@ -316,7 +314,7 @@ function ProviderCard({
             onChange={(e) => setNewModel(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && newModel.trim()) {
-                onChange({ models: [...provider.models, newModel.trim()] });
+                onChange({ available_models: [...provider.available_models, newModel.trim()] });
                 setNewModel("");
               }
             }}
@@ -326,7 +324,7 @@ function ProviderCard({
             className="btn btn-sm"
             onClick={() => {
               if (!newModel.trim()) return;
-              onChange({ models: [...provider.models, newModel.trim()] });
+              onChange({ available_models: [...provider.available_models, newModel.trim()] });
               setNewModel("");
             }}
           >

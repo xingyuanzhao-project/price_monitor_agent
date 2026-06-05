@@ -94,7 +94,7 @@ export interface LLMProviderConfig {
   provider_name: string;
   base_url: string;
   api_key: string;
-  models: string[];
+  available_models: string[];
 }
 
 export interface APICredential {

@@ -177,6 +177,17 @@ class CoreAgent:
 
             conversation_messages.append(assistant_message)
 
+            if self.stream_callback is not None:
+                stream_result = self.stream_callback({
+                    "node_id": self.node_id,
+                    "iteration": iteration_index,
+                    "content": assistant_message.get("content", ""),
+                    "finish_reason": finish_reason,
+                    "has_tool_calls": bool(assistant_message.get("tool_calls")),
+                })
+                if asyncio.iscoroutine(stream_result):
+                    await stream_result
+
             if assistant_message.get("tool_calls"):
                 tool_results = await self._process_tool_calls(
                     assistant_message["tool_calls"], tool_calls_record

@@ -75,8 +75,8 @@ export default function WorkflowCanvas() {
   const onConnect: OnConnect = useCallback(
     (connection) => {
       const edgeId = `edge-${crypto.randomUUID().slice(0, 8)}`;
-      const sourceNode = nodes.find((n) => n.id === connection.source);
-      const targetNode = nodes.find((n) => n.id === connection.target);
+      const sourceNode = nodes.find((node) => node.id === connection.source);
+      const targetNode = nodes.find((node) => node.id === connection.target);
 
       let edgeType = EdgeType.DATA_FLOW;
       if (

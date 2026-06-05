@@ -35,6 +35,22 @@ from backend.settings.models import UserSettings
 # Errors
 # ---------------------------------------------------------------------------
 
+class ToolOutputValidationError(Exception):
+    """Raised when a tool's return value does not match its declared output schema.
+
+    Attributes:
+        tool_name: The tool whose output failed validation.
+        validation_message: Human-readable description of the validation failure.
+    """
+
+    def __init__(self, tool_name: str, validation_message: str) -> None:
+        self.tool_name = tool_name
+        self.validation_message = validation_message
+        super().__init__(
+            f"Tool '{tool_name}' output validation failed: {validation_message}"
+        )
+
+
 class ToolAuthorizationError(Exception):
     """Raised when a tool call targets a tool outside the authorized set.
 
@@ -156,6 +172,11 @@ class ExecutionHarness:
 
         self._call_count += 1
 
+        # Validate tool output against the tool's declared output_schema if present.
+        output_schema = getattr(tool, "output_schema", None)
+        if output_schema is not None:
+            self._validate_tool_output(tool_name, result, output_schema)
+
         return result
 
     def get_tool_definitions(self, tool_names: list[str]) -> list[dict[str, Any]]:
@@ -189,6 +210,61 @@ class ExecutionHarness:
         """Reset the call counter and sliding-window timestamps to zero."""
         self._call_count = 0
         self._call_timestamps.clear()
+
+    def _validate_tool_output(
+        self,
+        tool_name: str,
+        output: Any,
+        output_schema: dict[str, Any],
+    ) -> None:
+        """Validate a tool's return value against its declared output schema.
+
+        Description:
+            Performs structural type checking against the output_schema dict.
+            Currently checks that the output is a dict when the schema
+            type is 'object', and that declared required keys are present.
+            Raises ToolOutputValidationError on any violation.
+
+        Params:
+            tool_name (str): Name of the tool whose output is being validated.
+            output (Any): The value returned by the tool.
+            output_schema (dict[str, Any]): JSON Schema dict describing expected output.
+
+        Returns:
+            None
+
+        Raises:
+            ToolOutputValidationError: If the output does not match the schema.
+        """
+        schema_type = output_schema.get("type")
+
+        if schema_type == "object":
+            if not isinstance(output, dict):
+                raise ToolOutputValidationError(
+                    tool_name,
+                    f"expected object (dict) but got {type(output).__name__}",
+                )
+            required_keys = output_schema.get("required", [])
+            missing_keys = [key for key in required_keys if key not in output]
+            if missing_keys:
+                raise ToolOutputValidationError(
+                    tool_name,
+                    f"output is missing required keys: {missing_keys}",
+                )
+
+        elif schema_type == "array":
+            if not isinstance(output, list):
+                raise ToolOutputValidationError(
+                    tool_name,
+                    f"expected array (list) but got {type(output).__name__}",
+                )
+
+        elif schema_type == "string":
+            if not isinstance(output, str):
+                raise ToolOutputValidationError(
+                    tool_name,
+                    f"expected string but got {type(output).__name__}",
+                )
 
     # -- private helpers ----------------------------------------------------
 

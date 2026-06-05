@@ -19,9 +19,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from backend.orchestration.executor import WorkflowExecutor
@@ -31,7 +34,19 @@ router = APIRouter(prefix="/api/runs", tags=["runs"])
 
 _executor: WorkflowExecutor | None = None
 _schema_persistence: SchemaPersistence | None = None
+
+# Keyed by run_id so each individual run has its own event queue.
 _event_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
+
+
+class StartRunRequest(BaseModel):
+    """Request body for starting a workflow run.
+
+    Attributes:
+        schema_id: Identifier of the schema to execute.
+    """
+
+    schema_id: str
 
 
 def init(
@@ -57,69 +72,88 @@ def init(
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@router.post("/{schema_id}/start")
-async def start_run(schema_id: str) -> dict[str, str]:
-    """Start a new workflow run for *schema_id*.
+@router.post("/")
+@router.post("")
+async def start_run(request: StartRunRequest) -> dict[str, Any]:
+    """Start a new workflow run for the schema identified in the request body.
 
     The run executes in the background.  Clients should connect to
-    ``GET /{schema_id}/stream`` immediately after to receive events.
+    ``GET /{run_id}/events`` immediately after to receive events.
 
     Args:
-        schema_id: ID of the schema to run.
+        request: StartRunRequest containing the schema_id to execute.
 
     Returns:
-        ``{"schema_id": …, "status": "started"}``.
+        A RunRecord-shaped dict containing run_id, schema_id, schema_name,
+        status, started_at, finished_at, and error_message.
 
     Raises:
         HTTPException 404: If the schema does not exist.
     """
     try:
-        schema = _schema_persistence.load_schema(schema_id)
+        schema = _schema_persistence.load_schema(request.schema_id)
     except FileNotFoundError:
-        raise HTTPException(404, detail=f"Schema '{schema_id}' not found")
+        raise HTTPException(404, detail=f"Schema '{request.schema_id}' not found")
+
+    run_id = str(uuid.uuid4())
+    started_at = datetime.now(timezone.utc)
 
     queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
-    _event_queues[schema_id] = queue
+    _event_queues[run_id] = queue
 
-    async def event_callback(event: dict[str, Any]) -> None:
-        """Push every executor event into the SSE queue."""
-        await queue.put(event)
+    async def event_callback(raw_event: dict[str, Any]) -> None:
+        """Normalise and push every executor event into the SSE queue."""
+        normalised = _normalise_event(raw_event, run_id)
+        await queue.put(normalised)
 
     async def run_task() -> None:
-        """Background coroutine that drives the executor and signals done."""
+        """Background coroutine that drives the executor and signals completion."""
         try:
             await _executor.execute_workflow(schema, event_callback)
-        except Exception as exc:
-            await queue.put({"type": "workflow_error", "error": str(exc)})
+        except Exception as execution_error:
+            await queue.put(_make_event(
+                run_id=run_id,
+                event_type="run_error",
+                node_id=None,
+                data={"error": str(execution_error)},
+            ))
         finally:
             await queue.put(None)
 
     asyncio.create_task(run_task())
 
-    return {"schema_id": schema_id, "status": "started"}
+    return {
+        "run_id": run_id,
+        "schema_id": schema.schema_id,
+        "schema_name": schema.name,
+        "status": "running",
+        "started_at": started_at.isoformat(),
+        "finished_at": None,
+        "error_message": None,
+    }
 
 
-@router.get("/{schema_id}/stream")
-async def stream_events(schema_id: str) -> EventSourceResponse:
-    """Stream execution events for the active run on *schema_id* via SSE.
+@router.get("/{run_id}/events")
+async def stream_events(run_id: str) -> EventSourceResponse:
+    """Stream execution events for an active run via SSE.
 
-    The connection stays open until a terminal event (``workflow_completed``,
-    ``workflow_error``, ``workflow_timeout``) is received, after which the
-    server closes the stream.
+    The connection stays open until the run terminates (``run_complete``
+    or ``run_error`` event), after which the server closes the stream.
 
     Args:
-        schema_id: Schema whose active run to stream.
+        run_id: Unique identifier of the run to stream.
 
     Returns:
-        An ``EventSourceResponse`` yielding JSON-encoded event dicts.
+        An ``EventSourceResponse`` yielding JSON-encoded event dicts, each
+        shaped as ``{event_id, run_id, node_id, event_type, timestamp, data}``.
 
     Raises:
-        HTTPException 404: If there is no active run queue for *schema_id*.
+        HTTPException 404: If there is no active run queue for *run_id*.
     """
-    queue = _event_queues.get(schema_id)
+    queue = _event_queues.get(run_id)
     if queue is None:
         raise HTTPException(
-            404, detail=f"No active run for schema '{schema_id}'"
+            404, detail=f"No active run found for run_id '{run_id}'"
         )
 
     async def event_generator():
@@ -134,25 +168,110 @@ async def stream_events(schema_id: str) -> EventSourceResponse:
 
 
 @router.get("/")
+@router.get("")
 async def list_records() -> list[dict[str, Any]]:
     """List all stored run records.
 
     Returns:
-        A JSON array of run-record summaries (newest first).
+        A JSON array of run-record summaries (newest first), each shaped as
+        ``{run_id, schema_id, schema_name, status, started_at, finished_at,
+        error_message}``.
     """
     records = _executor.list_run_records()
     return [
         {
             "run_id": record.run_id,
             "schema_id": record.schema_id,
+            "schema_name": record.schema_name,
             "status": record.status,
             "started_at": record.started_at.isoformat(),
-            "completed_at": (
+            "finished_at": (
                 record.completed_at.isoformat()
                 if record.completed_at
                 else None
             ),
-            "errors": record.errors,
+            "error_message": record.errors[0] if record.errors else None,
         }
         for record in records
     ]
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+def _make_event(
+    run_id: str,
+    event_type: str,
+    node_id: str | None,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    """Construct a normalised SSE event dict.
+
+    Args:
+        run_id: The run this event belongs to.
+        event_type: Semantic event type string.
+        node_id: Identifier of the node this event is about (or None).
+        data: Arbitrary payload for this event.
+
+    Returns:
+        A dict with event_id, run_id, node_id, event_type, timestamp, data.
+    """
+    return {
+        "event_id": str(uuid.uuid4()),
+        "run_id": run_id,
+        "node_id": node_id or "",
+        "event_type": event_type,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "data": data,
+    }
+
+
+def _normalise_event(
+    raw_event: dict[str, Any],
+    run_id: str,
+) -> dict[str, Any]:
+    """Translate a raw executor event into the canonical frontend shape.
+
+    The executor emits events with a ``type`` key and various fields.  This
+    function translates each known type into the ``{event_id, run_id,
+    node_id, event_type, timestamp, data}`` shape the frontend expects.
+
+    Args:
+        raw_event: The raw event dict from WorkflowExecutor.
+        run_id: The run identifier to embed.
+
+    Returns:
+        A normalised event dict ready for SSE serialisation.
+    """
+    raw_type = raw_event.get("type", "unknown")
+    node_id = raw_event.get("node_id", "")
+    data: dict[str, Any] = {
+        key: value
+        for key, value in raw_event.items()
+        if key not in {"type", "node_id", "run_id"}
+    }
+
+    type_mapping: dict[str, str] = {
+        "workflow_started": "run_start",
+        "workflow_completed": "run_complete",
+        "workflow_error": "run_error",
+        "workflow_timeout": "run_error",
+        "stage_started": "node_start",
+        "stage_completed": "node_complete",
+        "node_started": "node_start",
+        "node_completed": "node_complete",
+        "node_error": "node_error",
+        "node_output": "node_output",
+        "tool_call": "tool_call",
+        "tool_result": "tool_result",
+    }
+
+    event_type = type_mapping.get(raw_type, raw_type)
+
+    return _make_event(
+        run_id=run_id,
+        event_type=event_type,
+        node_id=node_id,
+        data=data,
+    )

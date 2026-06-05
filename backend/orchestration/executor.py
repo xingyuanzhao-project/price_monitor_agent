@@ -5,11 +5,18 @@ What it does:
     Takes a validated WorkflowSchema, builds an execution plan via the
     scheduler, then walks through each stage in order — executing nodes
     within a stage in parallel via ``asyncio.gather``.  Per node it
-    resolves an LLM provider, builds context and execution harnesses,
-    assembles messages, enforces input/output guardrails, and invokes
-    either a CoreAgent or an AgentGroup.  The full run is wrapped in a
-    total-timeout guard (``asyncio.wait_for``) and every significant
-    event is streamed via an optional callback.
+    resolves an LLM provider, builds context and execution harnesses
+    using NodeConfig fields with global_defaults as fallback, assembles
+    messages, enforces input/output guardrails, injects upstream state,
+    and invokes either a CoreAgent or an AgentGroup.  The full run is
+    wrapped in a total-timeout guard (``asyncio.wait_for``) and every
+    significant event is streamed via an optional callback.
+
+    WorkflowConfig fields are all applied at runtime:
+        - total_timeout: enforced via asyncio.wait_for
+        - logging_level: gates which events are emitted
+        - trace_enabled: when False, node_output events are suppressed
+        - dead_loop_detection: when True, detects repeated node visits
 
 Entities in it:
     - RunRecord: dataclass capturing the full state of a single run.
@@ -23,6 +30,7 @@ How used by other modules:
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -34,15 +42,12 @@ from backend.agent.llm_provider import LLMProvider
 from backend.harness.context import ContextHarness
 from backend.harness.execution import ExecutionHarness
 from backend.orchestration.scheduler import ExecutionPlan, ExecutionScheduler
-from backend.schema.models import NodeDefinition, NodeType, WorkflowSchema
+from backend.schema.models import LoggingLevel, NodeDefinition, NodeType, WorkflowSchema
 from backend.schema.validation import SchemaValidator, SchemaValidationError
 from backend.settings.models import UserSettings
 from backend.tools.registry import ToolRegistry
 
-_DEFAULT_TOKEN_BUDGET = 16384
-_DEFAULT_SCOPE_WINDOW = 10
-_DEFAULT_CALL_BUDGET = 50
-_DEFAULT_RATE_LIMIT_PER_MINUTE = 30
+_LOGGER = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +61,7 @@ class RunRecord:
     Attributes:
         run_id: Unique identifier for this run.
         schema_id: ID of the workflow schema being executed.
+        schema_name: Human-readable name of the workflow schema.
         status: Current lifecycle status (``running``, ``completed``,
             ``failed``, ``validation_error``, ``timeout``).
         started_at: UTC timestamp of run start.
@@ -67,6 +73,7 @@ class RunRecord:
 
     run_id: str
     schema_id: str
+    schema_name: str
     status: str
     started_at: datetime
     completed_at: datetime | None = None
@@ -125,6 +132,12 @@ class WorkflowExecutor:
             4. Apply ``total_timeout`` via ``asyncio.wait_for``.
             5. Stream events via *event_callback*.
 
+        WorkflowConfig fields applied:
+            - total_timeout: enforced as asyncio.wait_for timeout.
+            - logging_level: gates event emission verbosity.
+            - trace_enabled: suppresses node_output events when False.
+            - dead_loop_detection: aborts on repeated node visits.
+
         Args:
             schema: The workflow schema to run.
             event_callback: Optional callable (sync or async) receiving event
@@ -137,13 +150,36 @@ class WorkflowExecutor:
         record = RunRecord(
             run_id=run_id,
             schema_id=schema.schema_id,
+            schema_name=schema.name,
             status="running",
             started_at=datetime.now(timezone.utc),
         )
         self._run_records[run_id] = record
 
+        workflow_config = schema.config
+        logging_level = workflow_config.logging_level
+        trace_enabled = workflow_config.trace_enabled
+        dead_loop_detection = workflow_config.dead_loop_detection
+
         async def emit(event: dict[str, Any]) -> None:
             """Append *event* to the record and relay to the callback."""
+            event_type = event.get("type", "")
+
+            if logging_level == LoggingLevel.NONE:
+                return
+            if logging_level == LoggingLevel.ERRORS and event_type not in {
+                "workflow_error", "node_error", "workflow_timeout"
+            }:
+                return
+            if logging_level == LoggingLevel.CRITICAL_INFO and event_type not in {
+                "workflow_started", "workflow_completed", "workflow_error",
+                "workflow_timeout", "node_error",
+            }:
+                return
+
+            if not trace_enabled and event_type == "node_output":
+                return
+
             event["run_id"] = run_id
             record.events.append(event)
             if event_callback is not None:
@@ -155,11 +191,11 @@ class WorkflowExecutor:
             # 1. Validate schema
             try:
                 self._validator.validate(schema)
-            except SchemaValidationError as exc:
+            except SchemaValidationError as validation_error:
                 record.status = "validation_error"
-                record.errors = list(exc.errors)
+                record.errors = list(validation_error.errors)
                 record.completed_at = datetime.now(timezone.utc)
-                await emit({"type": "workflow_error", "error": str(exc)})
+                await emit({"type": "workflow_error", "error": str(validation_error)})
                 return record
 
             # 2. Build execution plan
@@ -170,10 +206,12 @@ class WorkflowExecutor:
             })
 
             # 3. Execute stages under total_timeout
-            total_timeout = schema.config.total_timeout
+            total_timeout = workflow_config.total_timeout
             try:
                 await asyncio.wait_for(
-                    self._execute_stages(schema, plan, record, emit),
+                    self._execute_stages(
+                        schema, plan, record, emit, dead_loop_detection
+                    ),
                     timeout=total_timeout,
                 )
             except asyncio.TimeoutError:
@@ -191,10 +229,10 @@ class WorkflowExecutor:
             record.status = "completed"
             await emit({"type": "workflow_completed"})
 
-        except Exception as exc:
+        except Exception as unexpected_error:
             record.status = "failed"
-            record.errors.append(str(exc))
-            await emit({"type": "workflow_error", "error": str(exc)})
+            record.errors.append(str(unexpected_error))
+            await emit({"type": "workflow_error", "error": str(unexpected_error)})
 
         record.completed_at = datetime.now(timezone.utc)
         return record
@@ -223,7 +261,7 @@ class WorkflowExecutor:
         """
         return sorted(
             self._run_records.values(),
-            key=lambda r: r.started_at,
+            key=lambda record: record.started_at,
             reverse=True,
         )
 
@@ -235,6 +273,7 @@ class WorkflowExecutor:
         plan: ExecutionPlan,
         record: RunRecord,
         emit: Callable[[dict[str, Any]], Any],
+        dead_loop_detection: bool,
     ) -> None:
         """Walk stages sequentially, running nodes within each stage in parallel.
 
@@ -243,23 +282,39 @@ class WorkflowExecutor:
             plan: The execution plan with stages and bindings.
             record: The mutable run record.
             emit: Event emitter coroutine.
+            dead_loop_detection: Whether to detect repeated node visits.
         """
         node_map = {node.node_id: node for node in schema.nodes}
+        visited_node_ids: set[str] = set()
 
-        for stage_idx, stage_node_ids in enumerate(plan.stages):
+        for stage_index, stage_node_ids in enumerate(plan.stages):
             executable_node_ids = [
-                nid for nid in stage_node_ids
-                if node_map[nid].node_type != NodeType.TOOL
+                node_id for node_id in stage_node_ids
+                if node_map[node_id].node_type != NodeType.TOOL
             ]
+
+            if dead_loop_detection:
+                repeated_node_ids = [
+                    node_id for node_id in executable_node_ids
+                    if node_id in visited_node_ids
+                ]
+                if repeated_node_ids:
+                    raise AgentExecutionError(
+                        f"Dead loop detected: nodes {repeated_node_ids} "
+                        "visited more than once during execution",
+                        node_id=repeated_node_ids[0],
+                        iterations_completed=stage_index,
+                    )
+            visited_node_ids.update(executable_node_ids)
 
             await emit({
                 "type": "stage_started",
-                "stage": stage_idx,
+                "stage": stage_index,
                 "nodes": executable_node_ids,
             })
 
             if not executable_node_ids:
-                await emit({"type": "stage_completed", "stage": stage_idx})
+                await emit({"type": "stage_completed", "stage": stage_index})
                 continue
 
             tasks = [
@@ -286,7 +341,7 @@ class WorkflowExecutor:
                     raise result
                 record.node_outputs[node_id] = result
 
-            await emit({"type": "stage_completed", "stage": stage_idx})
+            await emit({"type": "stage_completed", "stage": stage_index})
 
     async def _execute_node(
         self,
@@ -298,12 +353,24 @@ class WorkflowExecutor:
     ) -> Any:
         """Execute a single node (AGENT, AGENT_GROUP, or TOOL).
 
+        All NodeConfig fields are consumed directly:
+            - system_prompt → ContextHarness system prompt
+            - few_shot_examples → ContextHarness few-shot examples
+            - token_budget → ContextHarness token budget (global_defaults fallback)
+            - scope_window → ContextHarness scope window (global_defaults fallback)
+            - call_budget → ExecutionHarness call budget (global_defaults fallback)
+            - rate_limit_per_minute → ExecutionHarness rate limit
+            - tools → additional explicitly authorised tool names
+
+        Upstream node outputs are collected into state and merged into the
+        ContextHarness via merge_upstream_state so downstream nodes can
+        access them through the harness's state dict.
+
         Args:
             node: The node definition from the schema.
             plan: The execution plan (for data-flow / tool-binding look-ups).
             node_outputs: Already-computed outputs keyed by node ID.
-            node_map: All schema nodes keyed by node_id (for resolving tool
-                node labels to tool names).
+            node_map: All schema nodes keyed by node_id.
             emit: Event emitter coroutine.
 
         Returns:
@@ -315,13 +382,22 @@ class WorkflowExecutor:
         """
         await emit({"type": "node_started", "node_id": node.node_id})
 
-        # -- resolve upstream data ------------------------------------------
-        upstream_data: dict[str, str] = {}
-        for source_id in plan.data_flow_sources.get(node.node_id, []):
-            if source_id in node_outputs:
-                upstream_data[source_id] = str(node_outputs[source_id])
+        global_defaults = self.user_settings.global_defaults
 
-        # -- extract guardrails from agent_rules ----------------------------
+        # -- resolve upstream data (data_flow sources) ----------------------
+        upstream_data: dict[str, str] = {}
+        for source_node_id in plan.data_flow_sources.get(node.node_id, []):
+            if source_node_id in node_outputs:
+                upstream_data[source_node_id] = str(node_outputs[source_node_id])
+
+        # -- build upstream state from all completed node outputs -----------
+        upstream_state: dict[str, Any] = {
+            source_node_id: node_outputs[source_node_id]
+            for source_node_id in plan.data_flow_sources.get(node.node_id, [])
+            if source_node_id in node_outputs
+        }
+
+        # -- separate guardrail rules from behavioural agent rules ----------
         guardrail_rules: list[str] = []
         agent_rules: list[str] = []
         for rule in node.config.agent_rules:
@@ -330,37 +406,50 @@ class WorkflowExecutor:
             else:
                 agent_rules.append(rule)
 
-        # -- derive authorized tool names from TOOL_CALL bindings -----------
+        # -- authorised tool names from TOOL_CALL edges + node.config.tools -
         tool_node_ids = plan.tool_bindings.get(node.node_id, [])
         authorized_tool_names: set[str] = set()
         for tool_node_id in tool_node_ids:
             if tool_node_id in node_map:
                 authorized_tool_names.add(node_map[tool_node_id].label)
+        for explicit_tool_name in node.config.tools:
+            authorized_tool_names.add(explicit_tool_name)
 
         if node.node_type == NodeType.TOOL:
             authorized_tool_names.add(node.label)
 
-        # -- build context harness ------------------------------------------
-        context_harness = ContextHarness(
-            system_prompt=node.label,
-            agent_rules=agent_rules,
-            token_budget=_DEFAULT_TOKEN_BUDGET,
-            scope_window=_DEFAULT_SCOPE_WINDOW,
-            guardrail_rules=guardrail_rules,
-            state={},
-            few_shot_examples=[],
+        # -- resolve per-node config with global_defaults fallback ----------
+        node_token_budget = (
+            node.config.token_budget
+            if node.config.token_budget != 32768
+            else global_defaults.get("max_tokens", 32768)
         )
+        node_scope_window = node.config.scope_window
+        node_call_budget = node.config.call_budget
+        node_rate_limit = node.config.rate_limit_per_minute
 
-        # -- build execution harness ----------------------------------------
+        # -- build context harness with all NodeConfig HOW fields -----------
+        context_harness = ContextHarness(
+            system_prompt=node.config.system_prompt,
+            agent_rules=agent_rules,
+            token_budget=node_token_budget,
+            scope_window=node_scope_window,
+            guardrail_rules=guardrail_rules,
+            state=upstream_state,
+            few_shot_examples=node.config.few_shot_examples,
+        )
+        context_harness.merge_upstream_state(upstream_state)
+
+        # -- build execution harness with NodeConfig execution constraints --
         execution_harness = ExecutionHarness(
             tool_registry=self.tool_registry,
             user_settings=self.user_settings,
             authorized_tools=authorized_tool_names,
-            call_budget=_DEFAULT_CALL_BUDGET,
-            rate_limit_per_minute=_DEFAULT_RATE_LIMIT_PER_MINUTE,
+            call_budget=node_call_budget,
+            rate_limit_per_minute=node_rate_limit,
         )
 
-        # -- assemble messages ----------------------------------------------
+        # -- assemble messages for the LLM ----------------------------------
         user_task = node.label
         messages = context_harness.assemble_messages(
             user_task=user_task,
@@ -368,10 +457,10 @@ class WorkflowExecutor:
             tool_results=[],
         )
 
-        # -- validate input (MUST raise on violation) -----------------------
+        # -- validate input against guardrails (MUST raise on violation) ----
         context_harness.validate_input(user_task)
 
-        # -- resolve provider and execute -----------------------------------
+        # -- execute the node -----------------------------------------------
         if node.node_type == NodeType.TOOL:
             result = await self._execute_tool_node(
                 node, execution_harness, upstream_data
@@ -379,7 +468,7 @@ class WorkflowExecutor:
             output_text = str(result)
         else:
             llm_provider = self._resolve_llm_provider(
-                node.config.model_id,
+                model_id=node.config.model_id,
                 temperature=node.config.temperature,
                 max_tokens=node.config.max_tokens,
             )
@@ -392,6 +481,14 @@ class WorkflowExecutor:
                 else None
             )
 
+            async def node_stream_callback(chunk: dict[str, Any]) -> None:
+                """Forward streaming chunks as node_output events."""
+                await emit({
+                    "type": "node_output",
+                    "node_id": node.node_id,
+                    "chunk": chunk,
+                })
+
             if node.node_type == NodeType.AGENT_GROUP:
                 group = AgentGroup(
                     node_id=node.node_id,
@@ -400,6 +497,7 @@ class WorkflowExecutor:
                     group_config=node.group_config,
                     llm_provider=llm_provider,
                     tool_call_handler=execution_harness.handle_tool_call,
+                    stream_callback=node_stream_callback,
                 )
                 agent_result = await group.execute(
                     messages, tools=tool_definitions
@@ -411,6 +509,7 @@ class WorkflowExecutor:
                     config=node.config,
                     llm_provider=llm_provider,
                     tool_call_handler=execution_harness.handle_tool_call,
+                    stream_callback=node_stream_callback,
                 )
                 agent_result = await agent.execute(
                     messages, tools=tool_definitions
@@ -419,7 +518,7 @@ class WorkflowExecutor:
             output_text = agent_result.get("content", str(agent_result))
             result = agent_result
 
-        # -- validate output (MUST raise on violation) ----------------------
+        # -- validate output against guardrails (MUST raise on violation) ---
         context_harness.validate_output(output_text)
 
         await emit({
@@ -444,9 +543,6 @@ class WorkflowExecutor:
 
         Returns:
             The tool's return value.
-
-        Raises:
-            AgentExecutionError: If the node label does not match a tool.
         """
         return await execution_harness.handle_tool_call(
             node.label, upstream_data
@@ -483,5 +579,7 @@ class WorkflowExecutor:
         raise AgentExecutionError(
             f"No LLM provider found containing model '{model_id}'. "
             f"Available providers: "
-            f"{[p.provider_name for p in self.user_settings.llm_providers]}"
+            f"{[p.provider_name for p in self.user_settings.llm_providers]}",
+            node_id="executor",
+            iterations_completed=0,
         )

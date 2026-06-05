@@ -19,24 +19,20 @@ type TabId = "canvas" | "runs" | "settings";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>("canvas");
-  const selectedNodeId = useWorkflowStore((s) => s.selectedNodeId);
-  const setSchemas = useWorkflowStore((s) => s.setSchemas);
-  const setAvailableModels = useWorkflowStore((s) => s.setAvailableModels);
-  const setAvailableTools = useWorkflowStore((s) => s.setAvailableTools);
+  const selectedNodeId = useWorkflowStore((storeState) => storeState.selectedNodeId);
+  const setSchemas = useWorkflowStore((storeState) => storeState.setSchemas);
+  const setAvailableModels = useWorkflowStore((storeState) => storeState.setAvailableModels);
+  const setAvailableTools = useWorkflowStore((storeState) => storeState.setAvailableTools);
 
   const loadInitialData = useCallback(async () => {
-    try {
-      const [schemas, models, tools] = await Promise.all([
-        schemasApi.list(),
-        modelsApi.list(),
-        modelsApi.listTools(),
-      ]);
-      setSchemas(schemas);
-      setAvailableModels(models);
-      setAvailableTools(tools);
-    } catch {
-      /* Backend may not be running yet during development */
-    }
+    const [schemas, models, tools] = await Promise.all([
+      schemasApi.list(),
+      modelsApi.list(),
+      modelsApi.listTools(),
+    ]);
+    setSchemas(schemas);
+    setAvailableModels(models);
+    setAvailableTools(tools);
   }, [setSchemas, setAvailableModels, setAvailableTools]);
 
   useEffect(() => {

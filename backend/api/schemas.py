@@ -54,6 +54,7 @@ def init(
 # ---------------------------------------------------------------------------
 
 @router.get("/")
+@router.get("")
 async def list_schemas() -> list[dict]:
     """List all stored workflow schemas with summary info.
 
@@ -150,8 +151,29 @@ async def delete_schema(schema_id: str) -> dict[str, str]:
     return {"status": "deleted"}
 
 
+@router.post("/validate")
+async def validate_schema_body(schema: WorkflowSchema) -> dict:
+    """Run structural validation on a schema provided in the request body.
+
+    This endpoint accepts the schema directly in the POST body, enabling
+    the frontend to validate unsaved in-progress schemas.
+
+    Args:
+        schema: The WorkflowSchema to validate.
+
+    Returns:
+        ``{"valid": True, "errors": []}`` on success or
+        ``{"valid": False, "errors": [...]}`` on failure.
+    """
+    try:
+        _validator.validate(schema)
+        return {"valid": True, "errors": []}
+    except SchemaValidationError as exc:
+        return {"valid": False, "errors": list(exc.errors)}
+
+
 @router.post("/{schema_id}/validate")
-async def validate_schema(schema_id: str) -> dict[str, str]:
+async def validate_schema_by_id(schema_id: str) -> dict[str, str]:
     """Run structural validation on a stored schema.
 
     Args:

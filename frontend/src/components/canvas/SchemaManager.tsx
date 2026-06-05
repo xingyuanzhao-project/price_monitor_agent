@@ -12,18 +12,18 @@ import { schemasApi } from "../../api/client";
 import { LoggingLevel } from "../../types/schema";
 
 export default function SchemaManager() {
-  const schemas = useWorkflowStore((s) => s.schemas);
-  const schemaId = useWorkflowStore((s) => s.schemaId);
-  const schemaName = useWorkflowStore((s) => s.schemaName);
-  const schemaDescription = useWorkflowStore((s) => s.schemaDescription);
-  const workflowConfig = useWorkflowStore((s) => s.workflowConfig);
-  const setSchema = useWorkflowStore((s) => s.setSchema);
-  const clearSchema = useWorkflowStore((s) => s.clearSchema);
-  const setSchemas = useWorkflowStore((s) => s.setSchemas);
-  const setSchemaName = useWorkflowStore((s) => s.setSchemaName);
-  const setSchemaDescription = useWorkflowStore((s) => s.setSchemaDescription);
-  const setWorkflowConfig = useWorkflowStore((s) => s.setWorkflowConfig);
-  const toWorkflowSchema = useWorkflowStore((s) => s.toWorkflowSchema);
+  const schemas = useWorkflowStore((storeState) => storeState.schemas);
+  const schemaId = useWorkflowStore((storeState) => storeState.schemaId);
+  const schemaName = useWorkflowStore((storeState) => storeState.schemaName);
+  const schemaDescription = useWorkflowStore((storeState) => storeState.schemaDescription);
+  const workflowConfig = useWorkflowStore((storeState) => storeState.workflowConfig);
+  const setSchema = useWorkflowStore((storeState) => storeState.setSchema);
+  const clearSchema = useWorkflowStore((storeState) => storeState.clearSchema);
+  const setSchemas = useWorkflowStore((storeState) => storeState.setSchemas);
+  const setSchemaName = useWorkflowStore((storeState) => storeState.setSchemaName);
+  const setSchemaDescription = useWorkflowStore((storeState) => storeState.setSchemaDescription);
+  const setWorkflowConfig = useWorkflowStore((storeState) => storeState.setWorkflowConfig);
+  const toWorkflowSchema = useWorkflowStore((storeState) => storeState.toWorkflowSchema);
 
   const [createMode, setCreateMode] = useState(false);
   const [newName, setNewName] = useState("");

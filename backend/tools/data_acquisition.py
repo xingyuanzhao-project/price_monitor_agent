@@ -2,7 +2,7 @@
 Data acquisition tool for fetching market, news, social, and macroeconomic data.
 
 What it does:
-    Provides a single flexible FetchDataTool that supports 12 source types across
+    Provides a single flexible FetchDataTool that supports 14 source types across
     four categories (market, news, social, macro). The source_type parameter
     selects the specific data endpoint, required parameters, and defaults.
 
@@ -78,6 +78,36 @@ SOURCE_TYPE_DEFINITIONS: dict[str, dict[str, Any]] = {
         "required_params": ["thread_id"],
         "optional_params": ["platform", "include_replies"],
         "defaults": {"include_replies": True},
+    },
+    "account_timelines": {
+        "category": "social",
+        "required_params": ["account_handle"],
+        "optional_params": ["platform", "limit", "start_date", "end_date", "include_retweets"],
+        "defaults": {"platform": "all", "limit": 50, "include_retweets": False},
+    },
+    "news_headlines": {
+        "category": "news",
+        "required_params": ["query"],
+        "optional_params": ["language", "limit", "start_date", "end_date"],
+        "defaults": {"language": "en", "limit": 25},
+    },
+    "news_articles": {
+        "category": "news",
+        "required_params": ["query"],
+        "optional_params": ["language", "limit", "start_date", "end_date", "sources"],
+        "defaults": {"language": "en", "limit": 10},
+    },
+    "news_filings": {
+        "category": "news",
+        "required_params": ["ticker"],
+        "optional_params": ["filing_type", "limit", "start_date", "end_date"],
+        "defaults": {"limit": 10},
+    },
+    "earnings_transcripts": {
+        "category": "news",
+        "required_params": ["ticker"],
+        "optional_params": ["limit", "start_date", "end_date", "quarter", "year"],
+        "defaults": {"limit": 5},
     },
     "macro_economic": {
         "category": "macro",

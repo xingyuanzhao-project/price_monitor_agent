@@ -12,7 +12,7 @@ import { useWorkflowStore } from "../../store/workflowStore";
 import type { RunRecord, RunEvent } from "../../types/schema";
 
 export default function RunViewer() {
-  const schemaId = useWorkflowStore((s) => s.schemaId);
+  const schemaId = useWorkflowStore((storeState) => storeState.schemaId);
   const [records, setRecords] = useState<RunRecord[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
@@ -21,12 +21,8 @@ export default function RunViewer() {
   const streamEndRef = useRef<HTMLDivElement>(null);
 
   const loadRecords = useCallback(async () => {
-    try {
-      const list = await runsApi.listRecords();
-      setRecords(list);
-    } catch {
-      /* Backend may be offline */
-    }
+    const list = await runsApi.listRecords();
+    setRecords(list);
   }, []);
 
   useEffect(() => {

@@ -14,15 +14,15 @@ import { NodeType, GroupStructure } from "../../types/schema";
 import type { NodeConfig, AgentGroupConfig } from "../../types/schema";
 
 export default function NodeConfigPanel() {
-  const selectedNodeId = useWorkflowStore((s) => s.selectedNodeId);
-  const nodes = useWorkflowStore((s) => s.nodes);
-  const availableModels = useWorkflowStore((s) => s.availableModels);
-  const availableTools = useWorkflowStore((s) => s.availableTools);
-  const updateNode = useWorkflowStore((s) => s.updateNode);
-  const updateNodeConfig = useWorkflowStore((s) => s.updateNodeConfig);
-  const updateGroupConfig = useWorkflowStore((s) => s.updateGroupConfig);
-  const removeNode = useWorkflowStore((s) => s.removeNode);
-  const setSelectedNodeId = useWorkflowStore((s) => s.setSelectedNodeId);
+  const selectedNodeId = useWorkflowStore((storeState) => storeState.selectedNodeId);
+  const nodes = useWorkflowStore((storeState) => storeState.nodes);
+  const availableModels = useWorkflowStore((storeState) => storeState.availableModels);
+  const availableTools = useWorkflowStore((storeState) => storeState.availableTools);
+  const updateNode = useWorkflowStore((storeState) => storeState.updateNode);
+  const updateNodeConfig = useWorkflowStore((storeState) => storeState.updateNodeConfig);
+  const updateGroupConfig = useWorkflowStore((storeState) => storeState.updateGroupConfig);
+  const removeNode = useWorkflowStore((storeState) => storeState.removeNode);
+  const setSelectedNodeId = useWorkflowStore((storeState) => storeState.setSelectedNodeId);
 
   const [newRule, setNewRule] = useState("");
   const [newCondition, setNewCondition] = useState("");

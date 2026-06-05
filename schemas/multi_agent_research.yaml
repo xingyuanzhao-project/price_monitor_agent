@@ -1,0 +1,79 @@
+schema_id: multi_agent_research
+name: Multi-Agent Research Pipeline
+description: Planner, parallel analyst group, and synthesizer.
+nodes:
+  - node_id: research_planner
+    node_type: agent
+    label: Research Planner
+    config:
+      model_id: google/gemini-2.5-flash-lite
+      temperature: 0.5
+      max_tokens: 1024
+      agent_rules:
+        - Define research scope and key questions
+        - Provide clear direction for downstream analysts
+      retries: 2
+      backoff_multiplier: 1.5
+      termination_conditions:
+        - Research plan has at least 3 investigation areas
+      max_iterations: 3
+    position:
+      x: 300
+      y: 100
+  - node_id: analyst_group
+    node_type: agent_group
+    label: Analyst Team
+    config:
+      model_id: google/gemini-2.5-flash-lite
+      temperature: 0.6
+      max_tokens: 4096
+      agent_rules:
+        - Each analyst focuses on their assigned topic
+        - Provide evidence-based conclusions
+      retries: 2
+      backoff_multiplier: 1.5
+      termination_conditions:
+        - Analysis is complete with supporting evidence
+      max_iterations: 5
+    group_config:
+      max_parallel_agents: 2
+      min_agents: 2
+      max_agents: 2
+      group_structure: parallel
+      shared_state: {}
+      tool_authorization: []
+    position:
+      x: 300
+      y: 300
+  - node_id: synthesizer
+    node_type: agent
+    label: Report Synthesizer
+    config:
+      model_id: google/gemini-2.5-flash-lite
+      temperature: 0.4
+      max_tokens: 4096
+      agent_rules:
+        - Synthesize all analyst findings into a coherent report
+        - Highlight areas of agreement and disagreement
+      retries: 2
+      backoff_multiplier: 1.5
+      termination_conditions:
+        - Report includes executive summary and detailed findings
+      max_iterations: 3
+    position:
+      x: 300
+      y: 500
+edges:
+  - edge_id: planner_to_group
+    edge_type: data_flow
+    source_node_id: research_planner
+    target_node_id: analyst_group
+  - edge_id: group_to_synth
+    edge_type: data_flow
+    source_node_id: analyst_group
+    target_node_id: synthesizer
+config:
+  total_timeout: 180
+  logging_level: info
+  trace_enabled: true
+  dead_loop_detection: true

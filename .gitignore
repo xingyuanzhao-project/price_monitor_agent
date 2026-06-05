@@ -1,0 +1,16 @@
+# Environment variables (API keys, secrets)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# OS
+.DS_Store

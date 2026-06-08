@@ -21,7 +21,7 @@ from backend.schema.persistence import SchemaPersistence
 from backend.schema.validation import SchemaValidator, SchemaValidationError
 from backend.orchestration.executor import WorkflowExecutor
 from backend.harness.context import ContextHarness, GuardrailViolationError
-from backend.tools.technical_analysis import ComputeIndicatorTool
+from backend.tools.financial_analysis import TechnicalAnalysisTool
 from backend.tools.text_analysis import ChunkTextTool, ScoreTextTool
 
 
@@ -33,7 +33,7 @@ def _make_single_agent_schema(
     model_id: str = TEST_MODEL_ID,
     temperature: float = 0.7,
     max_iterations: int = 3,
-    agent_rules: list[str] | None = None,
+    instruction: list[str] | None = None,
 ) -> WorkflowSchema:
     return WorkflowSchema(
         schema_id="test_single_agent",
@@ -49,7 +49,7 @@ def _make_single_agent_schema(
                     temperature=temperature,
                     max_tokens=512,
                     max_iterations=max_iterations,
-                    agent_rules=agent_rules or ["Respond concisely"],
+                    instruction=instruction or ["Respond concisely"],
                 ),
                 position=NodePosition(x=100, y=100),
             )
@@ -97,7 +97,7 @@ async def test_sequential_two_agent_pipeline(workflow_executor: WorkflowExecutor
                     temperature=0.6,
                     max_tokens=512,
                     max_iterations=2,
-                    agent_rules=["Write exactly 2 sentences"],
+                    instruction=["Write exactly 2 sentences"],
                 ),
                 position=NodePosition(x=100, y=100),
             ),
@@ -110,7 +110,7 @@ async def test_sequential_two_agent_pipeline(workflow_executor: WorkflowExecutor
                     temperature=0.4,
                     max_tokens=512,
                     max_iterations=2,
-                    agent_rules=["Provide exactly one concrete suggestion"],
+                    instruction=["Provide exactly one concrete suggestion"],
                 ),
                 position=NodePosition(x=100, y=300),
             ),
@@ -142,7 +142,7 @@ async def test_sequential_two_agent_pipeline(workflow_executor: WorkflowExecutor
 
 
 # ---------------------------------------------------------------------------
-# Test 3: Agent with tool calls (compute_indicator RSI)
+# Test 3: Agent with tool calls (technical_analysis RSI)
 # ---------------------------------------------------------------------------
 
 
@@ -157,32 +157,32 @@ async def test_agent_with_tool_calls(workflow_executor: WorkflowExecutor):
     schema = WorkflowSchema(
         schema_id="test_tool_calls",
         name="Agent With Tool Calls",
-        description="Agent uses compute_indicator tool to calculate RSI.",
+        description="Agent uses technical_analysis tool to calculate RSI.",
         nodes=[
             NodeDefinition(
                 node_id="analyst",
                 node_type=NodeType.AGENT,
                 label=(
                     f"Calculate the RSI for the following close prices using the "
-                    f"compute_indicator tool with indicator_type='rsi' and "
-                    f"close_prices=[{prices_str}]. Report the final RSI values."
+                    f"technical_analysis tool with indicator='rsi' and "
+                    f"close=[{prices_str}]. Report the final RSI values."
                 ),
                 config=NodeConfig(
                     model_id=TEST_MODEL_ID,
                     temperature=0.1,
                     max_tokens=1024,
                     max_iterations=5,
-                    agent_rules=[
-                        "You MUST call the compute_indicator tool with indicator_type='rsi'",
+                    instruction=[
+                        "You MUST call the technical_analysis tool with indicator='rsi'",
                         "Report the numeric RSI values in your response",
                     ],
                 ),
                 position=NodePosition(x=100, y=100),
             ),
             NodeDefinition(
-                node_id="compute_indicator_tool",
+                node_id="technical_analysis_tool",
                 node_type=NodeType.TOOL,
-                label="compute_indicator",
+                label="technical_analysis",
                 config=NodeConfig(model_id=TEST_MODEL_ID),
                 position=NodePosition(x=300, y=100),
             ),
@@ -192,7 +192,7 @@ async def test_agent_with_tool_calls(workflow_executor: WorkflowExecutor):
                 edge_id="analyst_to_tool",
                 edge_type=EdgeType.TOOL_CALL,
                 source_node_id="analyst",
-                target_node_id="compute_indicator_tool",
+                target_node_id="technical_analysis_tool",
             )
         ],
         config=WorkflowConfig(total_timeout=60),
@@ -209,8 +209,8 @@ async def test_agent_with_tool_calls(workflow_executor: WorkflowExecutor):
     tool_calls_made = output.get("tool_calls_made", []) if isinstance(output, dict) else []
     assert len(tool_calls_made) > 0, "Agent did not make any tool calls"
 
-    found_rsi_call = any(tc.get("tool_name") == "compute_indicator" for tc in tool_calls_made)
-    assert found_rsi_call, f"No compute_indicator call found in: {tool_calls_made}"
+    found_rsi_call = any(tc.get("tool_name") == "technical_analysis" for tc in tool_calls_made)
+    assert found_rsi_call, f"No technical_analysis call found in: {tool_calls_made}"
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +234,7 @@ async def test_agent_group_execution(workflow_executor: WorkflowExecutor):
                     temperature=0.6,
                     max_tokens=1024,
                     max_iterations=3,
-                    agent_rules=["Provide evidence-based analysis"],
+                    instruction=["Provide evidence-based analysis"],
                 ),
                 group_config=AgentGroupConfig(
                     min_agents=2,
@@ -407,12 +407,13 @@ async def test_tools_in_isolation():
         45.84, 46.08, 45.89, 46.03, 45.61, 46.28, 46.28, 46.00,
         46.03, 46.41, 46.22, 45.64,
     ]
-    indicator_tool = ComputeIndicatorTool()
+    indicator_tool = TechnicalAnalysisTool()
     rsi_result = await indicator_tool.execute(
-        indicator_type="rsi", close_prices=rsi_prices
+        indicator="rsi", close=rsi_prices
     )
-    assert "rsi" in rsi_result
-    rsi_values = rsi_result["rsi"]
+    assert "columns" in rsi_result
+    rsi_col = next(iter(rsi_result["columns"].values()))
+    rsi_values = [v for v in rsi_col if v is not None]
     assert len(rsi_values) > 0
     for val in rsi_values:
         assert 0.0 <= val <= 100.0, f"RSI value {val} outside [0, 100]"
@@ -446,8 +447,8 @@ async def test_tools_in_isolation():
 
 def test_context_harness_guardrails():
     harness = ContextHarness(
-        system_prompt="You are a helpful assistant.",
-        agent_rules=["Be concise"],
+        system_prompt="",
+        instruction=["Be concise"],
         token_budget=4096,
         scope_window=5,
         guardrail_rules=[
@@ -489,7 +490,7 @@ async def test_varying_node_configs(workflow_executor: WorkflowExecutor):
                     temperature=0.1,
                     max_tokens=256,
                     max_iterations=1,
-                    agent_rules=["Answer with a single number and unit"],
+                    instruction=["Answer with a single number and unit"],
                 ),
                 position=NodePosition(x=100, y=100),
             ),
@@ -502,7 +503,7 @@ async def test_varying_node_configs(workflow_executor: WorkflowExecutor):
                     temperature=1.5,
                     max_tokens=256,
                     max_iterations=3,
-                    agent_rules=["Be highly creative and poetic"],
+                    instruction=["Be highly creative and poetic"],
                 ),
                 position=NodePosition(x=300, y=100),
             ),

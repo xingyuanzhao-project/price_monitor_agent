@@ -142,13 +142,11 @@ class NodeConfig(BaseModel):
         temperature: Sampling temperature for generation.
         max_tokens: Optional maximum token limit for responses.
         response_format: Optional structured output format specification.
-        agent_rules: List of system-level instructions for the agent.
+        instruction: User-created instruction prompts for the agent.
         retries: Number of retry attempts on failure.
-        backoff_multiplier: Multiplier for exponential backoff between retries.
-        fallback_model_id: Optional alternative model if primary fails.
+        retry_waiting_time: Base seconds for exponential backoff between retries.
         termination_conditions: List of conditions that end the agentic loop.
         max_iterations: Maximum iterations in the agentic loop.
-        system_prompt: System-level prompt for the LLM context assembly.
         token_budget: Maximum token budget for assembled context.
         scope_window: Number of few-shot examples to retain.
         tools: List of tool names authorized for this node.
@@ -157,17 +155,17 @@ class NodeConfig(BaseModel):
         few_shot_examples: In-context learning examples for the agent.
     """
 
+    provider: str = Field(default="openrouter", description="LLM provider identifier (e.g. openrouter, openai, ollama)")
     model_id: str = Field(description="LLM model identifier")
     temperature: float = Field(default=0.7, description="Sampling temperature")
     max_tokens: Optional[int] = Field(default=None, description="Maximum response tokens")
     response_format: Optional[dict] = Field(default=None, description="Structured output format")
-    agent_rules: list[str] = Field(default_factory=list, description="System instructions for the agent")
+    instruction: list[str] = Field(default_factory=list, description="User-created instruction prompts for the agent")
     retries: int = Field(default=2, description="Number of retry attempts")
-    backoff_multiplier: float = Field(default=1.5, description="Exponential backoff multiplier")
-    fallback_model_id: Optional[str] = Field(default=None, description="Fallback model on primary failure")
+    retry_waiting_time: float = Field(default=1.5, description="Base seconds for exponential backoff between retries")
     termination_conditions: list[str] = Field(default_factory=list, description="Conditions to end the loop")
     max_iterations: int = Field(default=10, description="Maximum agentic loop iterations")
-    system_prompt: str = Field(default="You are a helpful assistant.", description="System-level prompt")
+    iteration_sleep: float = Field(default=0, description="Seconds to sleep between iterations")
     token_budget: int = Field(default=32768, description="Maximum token budget for context assembly")
     scope_window: int = Field(default=5, description="Number of few-shot examples to retain")
     tools: list[str] = Field(default_factory=list, description="Authorized tool names for this node")

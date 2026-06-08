@@ -44,7 +44,14 @@ from backend.harness.execution import ExecutionHarness
 from backend.orchestration.scheduler import ExecutionPlan, ExecutionScheduler
 from backend.schema.models import LoggingLevel, NodeDefinition, NodeType, WorkflowSchema
 from backend.schema.validation import SchemaValidator, SchemaValidationError
-from backend.settings.models import UserSettings, resolve_provider_api_key
+from backend.settings.models import (
+    CLOUD_PROVIDER_API_BASE,
+    LOCAL_PROVIDERS,
+    UserSettings,
+    resolve_provider_api_key,
+    resolve_provider_base_url,
+)
+from backend.agent.localhost_resolver import resolve_localhost_url
 from backend.tools.registry import ToolRegistry
 
 _LOGGER = logging.getLogger(__name__)
@@ -122,6 +129,7 @@ class WorkflowExecutor:
         self,
         schema: WorkflowSchema,
         event_callback: Callable[[dict[str, Any]], Any] | None = None,
+        run_id: str | None = None,
     ) -> RunRecord:
         """Execute *schema* as a full workflow run.
 
@@ -142,11 +150,14 @@ class WorkflowExecutor:
             schema: The workflow schema to run.
             event_callback: Optional callable (sync or async) receiving event
                 dicts.  Called for every significant lifecycle transition.
+            run_id: Optional run identifier supplied by the caller. If None,
+                a new UUID is generated.
 
         Returns:
             A RunRecord capturing the full run state.
         """
-        run_id = str(uuid.uuid4())
+        if run_id is None:
+            run_id = str(uuid.uuid4())
         record = RunRecord(
             run_id=run_id,
             schema_id=schema.schema_id,
@@ -189,9 +200,12 @@ class WorkflowExecutor:
 
         try:
             # 1. Validate schema
+            _LOGGER.info("Validating schema '%s' (%d nodes, %d edges)",
+                         schema.name, len(schema.nodes), len(schema.edges))
             try:
                 self._validator.validate(schema)
             except SchemaValidationError as validation_error:
+                _LOGGER.error("Schema validation failed: %s", validation_error)
                 record.status = "validation_error"
                 record.errors = list(validation_error.errors)
                 record.completed_at = datetime.now(timezone.utc)
@@ -200,6 +214,7 @@ class WorkflowExecutor:
 
             # 2. Build execution plan
             plan = self._scheduler.build_execution_plan(schema)
+            _LOGGER.info("Execution plan built: %d stages", len(plan.stages))
             await emit({
                 "type": "workflow_started",
                 "stages": len(plan.stages),
@@ -227,9 +242,11 @@ class WorkflowExecutor:
                 return record
 
             record.status = "completed"
+            _LOGGER.info("Workflow completed successfully")
             await emit({"type": "workflow_completed"})
 
         except Exception as unexpected_error:
+            _LOGGER.error("Workflow failed: %s", unexpected_error)
             record.status = "failed"
             record.errors.append(str(unexpected_error))
             await emit({"type": "workflow_error", "error": str(unexpected_error)})
@@ -324,6 +341,7 @@ class WorkflowExecutor:
                     node_outputs=record.node_outputs,
                     node_map=node_map,
                     emit=emit,
+                    run_id=record.run_id,
                 )
                 for node_id in executable_node_ids
             ]
@@ -350,11 +368,12 @@ class WorkflowExecutor:
         node_outputs: dict[str, Any],
         node_map: dict[str, NodeDefinition],
         emit: Callable[[dict[str, Any]], Any],
+        run_id: str = "",
     ) -> Any:
         """Execute a single node (AGENT, AGENT_GROUP, or TOOL).
 
         All NodeConfig fields are consumed directly:
-            - system_prompt → ContextHarness system prompt
+            - user input prompt → agent receives instruction from user
             - few_shot_examples → ContextHarness few-shot examples
             - token_budget → ContextHarness token budget (global_defaults fallback)
             - scope_window → ContextHarness scope window (global_defaults fallback)
@@ -381,6 +400,8 @@ class WorkflowExecutor:
             GuardrailViolationError: If input or output validation fails.
         """
         await emit({"type": "node_started", "node_id": node.node_id})
+        _LOGGER.info("Node '%s' (%s) started — model=%s",
+                     node.label, node.node_id, node.config.model_id)
 
         global_defaults = self.user_settings.global_defaults
 
@@ -397,14 +418,14 @@ class WorkflowExecutor:
             if source_node_id in node_outputs
         }
 
-        # -- separate guardrail rules from behavioural agent rules ----------
+        # -- separate guardrail rules from user instruction ------------------
         guardrail_rules: list[str] = []
-        agent_rules: list[str] = []
-        for rule in node.config.agent_rules:
-            if rule.startswith("GUARDRAIL:"):
-                guardrail_rules.append(rule.removeprefix("GUARDRAIL:").strip())
+        instruction: list[str] = []
+        for item in node.config.instruction:
+            if item.startswith("GUARDRAIL:"):
+                guardrail_rules.append(item.removeprefix("GUARDRAIL:").strip())
             else:
-                agent_rules.append(rule)
+                instruction.append(item)
 
         # -- authorised tool names from TOOL_CALL edges + node.config.tools -
         tool_node_ids = plan.tool_bindings.get(node.node_id, [])
@@ -430,8 +451,8 @@ class WorkflowExecutor:
 
         # -- build context harness with all NodeConfig HOW fields -----------
         context_harness = ContextHarness(
-            system_prompt=node.config.system_prompt,
-            agent_rules=agent_rules,
+            system_prompt="",
+            instruction=instruction,
             token_budget=node_token_budget,
             scope_window=node_scope_window,
             guardrail_rules=guardrail_rules,
@@ -447,6 +468,7 @@ class WorkflowExecutor:
             authorized_tools=authorized_tool_names,
             call_budget=node_call_budget,
             rate_limit_per_minute=node_rate_limit,
+            run_id=run_id,
         )
 
         # -- assemble messages for the LLM ----------------------------------
@@ -469,6 +491,7 @@ class WorkflowExecutor:
         else:
             llm_provider = self._resolve_llm_provider(
                 model_id=node.config.model_id,
+                provider_name=node.config.provider,
                 temperature=node.config.temperature,
                 max_tokens=node.config.max_tokens,
             )
@@ -496,7 +519,7 @@ class WorkflowExecutor:
                     config=node.config,
                     group_config=node.group_config,
                     llm_provider=llm_provider,
-                    tool_call_handler=execution_harness.handle_tool_call,
+                    tool_call_handler=execution_harness.process_response,
                     stream_callback=node_stream_callback,
                 )
                 agent_result = await group.execute(
@@ -508,7 +531,7 @@ class WorkflowExecutor:
                     label=node.label,
                     config=node.config,
                     llm_provider=llm_provider,
-                    tool_call_handler=execution_harness.handle_tool_call,
+                    tool_call_handler=execution_harness.process_response,
                     stream_callback=node_stream_callback,
                 )
                 agent_result = await agent.execute(
@@ -521,6 +544,8 @@ class WorkflowExecutor:
         # -- validate output against guardrails (MUST raise on violation) ---
         context_harness.validate_output(output_text)
 
+        _LOGGER.info("Node '%s' completed — output length: %d chars",
+                     node.label, len(output_text))
         await emit({
             "type": "node_completed",
             "node_id": node.node_id,
@@ -551,44 +576,81 @@ class WorkflowExecutor:
     def _resolve_llm_provider(
         self,
         model_id: str,
+        provider_name: str = "",
         temperature: float = 0.7,
         max_tokens: int | None = None,
     ) -> LLMProvider:
-        """Find the LLM provider whose available_models contains *model_id*.
+        """Resolve an LLM provider by declared provider name, falling back to model lookup.
+
+        Routes by provider identity first (the general path). If provider_name
+        is empty, falls back to scanning available_models lists for backward
+        compatibility with schemas that only declare model_id.
 
         Args:
-            model_id: The model identifier to look up.
-            temperature: Sampling temperature for the provider.
-            max_tokens: Maximum response tokens for the provider.
+            model_id: The model identifier to use.
+            provider_name: Declared provider name from the node config.
+            temperature: Sampling temperature.
+            max_tokens: Maximum response tokens.
 
         Returns:
-            An LLMProvider instance configured for *model_id*.
+            An LLMProvider instance configured for the provider and model.
 
         Raises:
-            AgentExecutionError: If no provider offers *model_id*.
+            AgentExecutionError: If provider cannot be resolved or key is missing.
         """
-        for provider_config in self.user_settings.llm_providers:
-            if model_id in provider_config.available_models:
-                api_key = resolve_provider_api_key(provider_config)
-                if not api_key:
-                    raise AgentExecutionError(
-                        f"Environment variable '{provider_config.api_key_env}' "
-                        f"is not set for provider '{provider_config.provider_name}'. "
-                        f"Populate it in the .env file or export it before running.",
-                        node_id="executor",
-                        iterations_completed=0,
-                    )
-                return LLMProvider(
-                    api_key=api_key,
-                    model_id=model_id,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    base_url=provider_config.base_url,
+        provider_config = None
+
+        if provider_name:
+            try:
+                provider_config = self.user_settings.get_provider_by_name(provider_name)
+            except KeyError:
+                raise AgentExecutionError(
+                    f"Provider '{provider_name}' is not configured in settings. "
+                    f"Available: {[p.provider_name for p in self.user_settings.llm_providers]}",
+                    node_id="executor",
+                    iterations_completed=0,
                 )
-        raise AgentExecutionError(
-            f"No LLM provider found containing model '{model_id}'. "
-            f"Available providers: "
-            f"{[p.provider_name for p in self.user_settings.llm_providers]}",
-            node_id="executor",
-            iterations_completed=0,
+        else:
+            for candidate in self.user_settings.llm_providers:
+                if model_id in candidate.available_models:
+                    provider_config = candidate
+                    break
+
+        if provider_config is None:
+            raise AgentExecutionError(
+                f"No LLM provider found for model '{model_id}'. "
+                f"Available providers: "
+                f"{[p.provider_name for p in self.user_settings.llm_providers]}",
+                node_id="executor",
+                iterations_completed=0,
+            )
+
+        api_key = resolve_provider_api_key(provider_config)
+        if not api_key and not provider_config.is_local:
+            raise AgentExecutionError(
+                f"API key not configured for provider '{provider_config.provider_name}'. "
+                f"Set the key via the Settings page or add it to the .env file.",
+                node_id="executor",
+                iterations_completed=0,
+            )
+
+        base_url = resolve_provider_base_url(provider_config)
+        if not base_url:
+            raise AgentExecutionError(
+                f"No base URL configured for provider '{provider_config.provider_name}'. "
+                f"Set the endpoint URL in the Settings page.",
+                node_id="executor",
+                iterations_completed=0,
+            )
+
+        if provider_config.is_local:
+            base_url = resolve_localhost_url(base_url)
+
+        return LLMProvider(
+            api_key=api_key or "dummy",
+            model_id=model_id,
+            provider=provider_config.provider_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            base_url=base_url,
         )

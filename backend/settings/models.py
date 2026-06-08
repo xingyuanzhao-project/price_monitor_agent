@@ -8,12 +8,21 @@ What it does:
     with lookup methods.  LLM API keys are never stored in config — they
     live in environment variables (typically loaded from ``.env``).
 
+    Provider taxonomy splits providers into cloud (known base URLs) and local
+    (user-configured base URLs for Ollama, vLLM, llama.cpp).  This follows
+    the nocode-workflow pattern of first-class local model support.
+
 Entities in it:
-    - PROVIDER_DEFAULT_ENV_VAR: Mapping from canonical provider name to env-var name.
+    - PROVIDER_DEFAULT_ENV_VAR: Mapping from cloud provider name to env-var name.
+    - LOCAL_ENDPOINT_ENV_VAR: Mapping from local provider name to env-var name.
+    - CLOUD_PROVIDER_API_BASE: Known base URLs for cloud providers.
+    - LOCAL_PROVIDERS: Set of local provider identifiers.
+    - PROVIDER_AUTH_TEST_URLS: Auth-gated endpoints for key validation.
     - APICredential: A named credential with a type classification and arbitrary fields.
     - LLMProviderConfig: Connection configuration for a single LLM provider.
     - UserSettings: Aggregated user settings with credentials, providers, and defaults.
     - resolve_provider_api_key: Resolve a provider's API key from the environment.
+    - resolve_provider_base_url: Resolve a provider's base URL (cloud=known, local=env).
 
 How used by other modules:
     - backend.tools.base injects credentials from UserSettings into tool instances.
@@ -23,6 +32,7 @@ How used by other modules:
 """
 
 import os
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -33,20 +43,37 @@ PROVIDER_DEFAULT_ENV_VAR: dict[str, str] = {
     "google": "GOOGLE_API_KEY",
 }
 
+LOCAL_ENDPOINT_ENV_VAR: dict[str, str] = {
+    "ollama": "OLLAMA_API_BASE",
+    "vllm": "VLLM_API_BASE",
+    "llama_cpp": "LLAMA_CPP_API_BASE",
+}
+
+CLOUD_PROVIDER_API_BASE: dict[str, str] = {
+    "openrouter": "https://openrouter.ai/api/v1",
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com/v1",
+    "google": "https://generativelanguage.googleapis.com/v1beta/openai/",
+}
+
+LOCAL_PROVIDERS: frozenset[str] = frozenset({"ollama", "vllm", "llama_cpp"})
+
+PROVIDER_AUTH_TEST_URLS: dict[str, str] = {
+    "openrouter": "https://openrouter.ai/api/v1/auth/key",
+    "openai": "https://api.openai.com/v1/models",
+    "anthropic": "https://api.anthropic.com/v1/models",
+    "google": "https://generativelanguage.googleapis.com/v1beta/models",
+}
+
+ProviderName = Literal["openrouter", "openai", "anthropic", "google"]
+LocalProviderName = Literal["ollama", "vllm", "llama_cpp"]
+AnyProviderName = Literal[
+    "openrouter", "openai", "anthropic", "google", "ollama", "vllm", "llama_cpp"
+]
+
 
 class APICredential(BaseModel):
-    """
-    A named API credential with type classification and key-value fields.
-
-    Description:
-        Represents a single set of credentials for an external service,
-        identified by name and classified by type for lookup purposes.
-
-    Attributes:
-        credential_name: Unique name identifying this credential set.
-        credential_type: Classification of the credential (e.g., 'api_key', 'oauth').
-        fields: Key-value pairs holding the actual credential data.
-    """
+    """A named API credential with type classification and key-value fields."""
 
     credential_name: str = Field(description="Unique credential identifier name")
     credential_type: str = Field(description="Classification type of this credential")
@@ -54,59 +81,66 @@ class APICredential(BaseModel):
 
 
 class LLMProviderConfig(BaseModel):
-    """
-    Connection configuration for a single LLM provider endpoint.
+    """Connection configuration for a single LLM provider endpoint.
 
-    Description:
-        Stores the endpoint URL, the name of the environment variable holding
-        the API key, and the list of available models.  The actual secret is
-        never persisted in config — it is resolved at runtime via
-        ``resolve_provider_api_key``.
-
-    Attributes:
-        provider_name: Unique name identifying this provider.
-        base_url: Base URL endpoint for the provider's API.
-        api_key_env: Name of the environment variable that holds the API key.
-        available_models: List of model identifiers available from this provider.
+    For cloud providers, ``base_url`` is derived from CLOUD_PROVIDER_API_BASE
+    at runtime — the stored value acts as an override only. For local providers,
+    ``base_url`` is the user-configured endpoint (e.g. http://localhost:11434/v1).
     """
 
-    provider_name: str = Field(description="Unique provider identifier name")
-    base_url: str = Field(description="Provider API base URL")
-    api_key_env: str = Field(description="Environment variable name for the API key")
-    available_models: list[str] = Field(description="Available model identifiers")
+    provider_name: str = Field(description="Provider identifier (e.g. openrouter, ollama)")
+    base_url: str = Field(default="", description="Provider API base URL (empty = use known default)")
+    api_key_env: str = Field(default="", description="Environment variable name for the API key")
+    available_models: list[str] = Field(default_factory=list, description="Available model identifiers")
+
+    @property
+    def is_local(self) -> bool:
+        return self.provider_name in LOCAL_PROVIDERS
 
 
 def resolve_provider_api_key(provider: LLMProviderConfig) -> str:
-    """Read the provider's API key from ``os.environ``.
+    """Resolve the API key for a provider from the environment.
 
-    Args:
-        provider: The LLM provider config whose key to resolve.
-
-    Returns:
-        The API key string (may be empty if not set).
+    For local providers without a configured api_key_env, returns "dummy"
+    since local servers typically don't require authentication.
     """
-    return os.environ.get(provider.api_key_env, "")
+    if provider.api_key_env:
+        return os.environ.get(provider.api_key_env, "")
+    if provider.is_local:
+        return "dummy"
+    default_env = PROVIDER_DEFAULT_ENV_VAR.get(provider.provider_name, "")
+    if default_env:
+        return os.environ.get(default_env, "")
+    return ""
+
+
+def resolve_provider_base_url(provider: LLMProviderConfig) -> str:
+    """Resolve the effective base URL for a provider.
+
+    Cloud providers use CLOUD_PROVIDER_API_BASE by default unless overridden.
+    Local providers read their URL from the environment variable defined
+    in LOCAL_ENDPOINT_ENV_VAR.
+    """
+    if provider.base_url:
+        return provider.base_url
+
+    if provider.is_local:
+        env_var = LOCAL_ENDPOINT_ENV_VAR.get(provider.provider_name, "")
+        return os.environ.get(env_var, "").strip()
+
+    return CLOUD_PROVIDER_API_BASE.get(provider.provider_name, "")
+
+
+class AdditionalToolApi(BaseModel):
+    """User-configured additional tool API with source selection and key."""
+
+    source_id: str = Field(description="Source identifier from the closed list")
+    api_key: str = Field(default="", description="API key for this source")
+    base_url: str = Field(default="", description="Override base URL (empty = use default)")
 
 
 class UserSettings(BaseModel):
-    """
-    Top-level aggregation of all user configuration.
-
-    Description:
-        Combines API credentials, LLM provider configurations, and global
-        default settings into a single container. Provides lookup methods
-        that raise KeyError when requested items are not found.
-
-    Attributes:
-        api_credentials: List of all configured API credentials.
-        llm_providers: List of all configured LLM provider connections.
-        global_defaults: Dictionary of global default settings.
-
-    Methods:
-        get_provider_by_name: Retrieve a provider config by its name.
-        get_credential_by_name: Retrieve a credential by its name.
-        get_credential_by_type: Retrieve a credential by its type.
-    """
+    """Top-level aggregation of all user configuration."""
 
     api_credentials: list[APICredential] = Field(
         default_factory=list, description="All configured API credentials"
@@ -117,23 +151,15 @@ class UserSettings(BaseModel):
     global_defaults: dict = Field(
         default_factory=dict, description="Global default settings"
     )
+    enabled_public_sources: list[str] = Field(
+        default_factory=list, description="Source IDs of enabled public data sources"
+    )
+    additional_tool_apis: list[AdditionalToolApi] = Field(
+        default_factory=list, description="User-configured additional tool API entries"
+    )
 
     def get_provider_by_name(self, provider_name: str) -> LLMProviderConfig:
-        """
-        Retrieve an LLM provider configuration by its name.
-
-        Description:
-            Searches the llm_providers list for a provider matching the given name.
-
-        Params:
-            provider_name (str): The unique name of the provider to find.
-
-        Returns:
-            LLMProviderConfig: The matching provider configuration.
-
-        Raises:
-            KeyError: If no provider with the given name exists.
-        """
+        """Retrieve an LLM provider configuration by its name."""
         for provider in self.llm_providers:
             if provider.provider_name == provider_name:
                 return provider
@@ -143,21 +169,7 @@ class UserSettings(BaseModel):
         )
 
     def get_credential_by_name(self, credential_name: str) -> APICredential:
-        """
-        Retrieve an API credential by its unique name.
-
-        Description:
-            Searches the api_credentials list for a credential matching the given name.
-
-        Params:
-            credential_name (str): The unique name of the credential to find.
-
-        Returns:
-            APICredential: The matching credential.
-
-        Raises:
-            KeyError: If no credential with the given name exists.
-        """
+        """Retrieve an API credential by its unique name."""
         for credential in self.api_credentials:
             if credential.credential_name == credential_name:
                 return credential
@@ -167,22 +179,7 @@ class UserSettings(BaseModel):
         )
 
     def get_credential_by_type(self, credential_type: str) -> APICredential:
-        """
-        Retrieve the first API credential matching a given type.
-
-        Description:
-            Searches the api_credentials list for the first credential with
-            the specified type classification.
-
-        Params:
-            credential_type (str): The type classification to search for.
-
-        Returns:
-            APICredential: The first matching credential.
-
-        Raises:
-            KeyError: If no credential with the given type exists.
-        """
+        """Retrieve the first API credential matching a given type."""
         for credential in self.api_credentials:
             if credential.credential_type == credential_type:
                 return credential

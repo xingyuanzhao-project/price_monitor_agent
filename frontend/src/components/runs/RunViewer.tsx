@@ -1,16 +1,16 @@
 /**
  * Runs viewer: left panel of run list, right panel of live event stream,
- * bottom terminal showing raw event payloads for the selected run.
- *
- * Run list shows all runs (active and historical) in a single scrollable list
- * with status badges. Selecting a run opens its event stream. If the run is
- * still active, an SSE connection is established to receive events in real time.
- * The bottom terminal renders raw JSON payloads in chronological order.
+ * bottom panel with real log terminal powered by the backend's Python
+ * logging pipeline streamed via SSE.
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { runsApi } from "../../api/client";
+import { useRunLogStream } from "../../hooks/useRunLogStream";
+import LogStreamViewer from "./LogStreamViewer";
 import type { RunRecord, RunEvent } from "../../types/schema";
+
+const RUN_LIST_POLL_MS = 2000;
 
 export default function RunViewer() {
   const [records, setRecords] = useState<RunRecord[]>([]);
@@ -19,7 +19,10 @@ export default function RunViewer() {
   const [streaming, setStreaming] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const eventsEndRef = useRef<HTMLDivElement>(null);
-  const terminalEndRef = useRef<HTMLDivElement>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const { lines, terminalStatus, connectionError } =
+    useRunLogStream(selectedRunId);
 
   const loadRecords = useCallback(async () => {
     const list = await runsApi.listRecords();
@@ -30,6 +33,23 @@ export default function RunViewer() {
     loadRecords();
   }, [loadRecords]);
 
+  // Auto-poll while any run is in "running" state
+  useEffect(() => {
+    const hasRunning = records.some((r) => r.status === "running");
+    if (hasRunning && !pollRef.current) {
+      pollRef.current = setInterval(loadRecords, RUN_LIST_POLL_MS);
+    } else if (!hasRunning && pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [records, loadRecords]);
+
   useEffect(() => {
     return () => {
       eventSourceRef.current?.close();
@@ -38,7 +58,6 @@ export default function RunViewer() {
 
   useEffect(() => {
     eventsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    terminalEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [events]);
 
   const openEventStream = useCallback((runId: string) => {
@@ -57,13 +76,9 @@ export default function RunViewer() {
       setSelectedRunId(runId);
       setEvents([]);
       setStreaming(false);
-
-      const record = records.find((record) => record.run_id === runId);
-      if (record?.status === "running") {
-        openEventStream(runId);
-      }
+      openEventStream(runId);
     },
-    [records, openEventStream]
+    [openEventStream]
   );
 
   const formatTimestamp = (iso: string) => {
@@ -78,12 +93,12 @@ export default function RunViewer() {
     });
   };
 
-  const selectedRecord = records.find((record) => record.run_id === selectedRunId);
+  const selectedRecord = records.find((r) => r.run_id === selectedRunId);
 
   return (
     <div className="run-viewer-layout">
 
-      {/* ── Left panel: run list ────────────────────────────────────── */}
+      {/* Left panel: run list */}
       <div className="runs-list-panel">
         <div className="runs-list-header">
           <span>Runs</span>
@@ -117,7 +132,7 @@ export default function RunViewer() {
         )}
       </div>
 
-      {/* ── Right panel: event stream ────────────────────────────────── */}
+      {/* Right panel: event stream + log terminal */}
       <div className="run-events-panel">
         {selectedRunId ? (
           <>
@@ -162,30 +177,13 @@ export default function RunViewer() {
         )}
       </div>
 
-      {/* ── Bottom terminal ──────────────────────────────────────────── */}
+      {/* Bottom panel: real log terminal */}
       <div className="run-terminal-panel">
-        <div className="run-terminal-bar">Terminal</div>
-        <div className="run-terminal-body">
-          {events.length === 0 ? (
-            <span style={{ color: "var(--color-text-muted)" }}>No output.</span>
-          ) : (
-            events.map((event) => (
-              <div key={`term-${event.event_id}`} className="terminal-line">
-                <span className="terminal-prompt">&gt;</span>
-                <span className={`terminal-event-type type-${event.event_type}`}>
-                  [{event.event_type}]
-                </span>
-                {event.node_id && (
-                  <span className="terminal-node-id">{event.node_id}</span>
-                )}
-                <span className="terminal-payload">
-                  {JSON.stringify(event.data)}
-                </span>
-              </div>
-            ))
-          )}
-          <div ref={terminalEndRef} />
-        </div>
+        <LogStreamViewer
+          lines={lines}
+          terminalStatus={terminalStatus}
+          connectionError={connectionError}
+        />
       </div>
 
     </div>

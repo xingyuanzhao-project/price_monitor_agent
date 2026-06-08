@@ -10,10 +10,11 @@ load_dotenv()
 
 from backend.tools.registry import ToolRegistry
 from backend.tools.data_acquisition import FetchDataTool
-from backend.tools.technical_analysis import (
-    ComputeIndicatorTool,
-    ComputeStatisticTool,
-    DetectSignalTool,
+from backend.tools.financial_analysis import (
+    TechnicalAnalysisTool,
+    QuantitativeAnalysisTool,
+    SignalAnalysisTool,
+    DiagnosticAnalysisTool,
 )
 from backend.tools.text_analysis import (
     ChunkTextTool,
@@ -47,9 +48,10 @@ def tool_registry() -> ToolRegistry:
     registry = ToolRegistry()
     for tool_instance in [
         FetchDataTool(),
-        ComputeIndicatorTool(),
-        ComputeStatisticTool(),
-        DetectSignalTool(),
+        TechnicalAnalysisTool(),
+        QuantitativeAnalysisTool(),
+        SignalAnalysisTool(),
+        DiagnosticAnalysisTool(),
         ChunkTextTool(),
         SemanticSearchTool(),
         ExtractEntitiesTool(),

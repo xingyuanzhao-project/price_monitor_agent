@@ -29,9 +29,13 @@ function AgentNodeComponent({ data, selected }: NodeProps) {
         <span>{label}</span>
       </div>
 
-      {config?.model_id && (
-        <div className="agent-node-badge">{config.model_id}</div>
-      )}
+      {nodeType === "tool"
+        ? config?.tools?.[0] && (
+            <div className="agent-node-badge">{config.tools[0]}</div>
+          )
+        : config?.model_id && (
+            <div className="agent-node-badge">{config.model_id}</div>
+          )}
 
       <Handle type="source" position={Position.Bottom} />
     </div>

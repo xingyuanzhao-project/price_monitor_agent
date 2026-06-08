@@ -4,13 +4,16 @@ Tools subpackage for extensible tool execution in agent workflows.
 What it does:
     Provides a base class for tools, a registry for tool discovery, and concrete
     tool implementations covering data acquisition, technical analysis, text
-    analysis, alert dispatch, and output writing.
+    analysis, backtesting, alert dispatch, and output writing.
 
 Entities in it:
     - base: Abstract BaseTool class and ToolExecutionError exception.
     - registry: ToolRegistry for registering, retrieving, and listing tools.
     - data_acquisition: FetchDataTool for retrieving market, news, social, and macro data.
-    - technical_analysis: ComputeIndicatorTool, ComputeStatisticTool, DetectSignalTool.
+    - financial_analysis: TechnicalAnalysisTool, QuantitativeAnalysisTool,
+      SignalAnalysisTool, DiagnosticAnalysisTool.
+    - backtest: DetectRegimeTool, EstimateParametersTool, SimulateProcessTool,
+      RunMonteCarloTool.
     - text_analysis: ChunkTextTool, SemanticSearchTool, ExtractEntitiesTool,
       ClassifyTextTool, ScoreTextTool, SummarizeTextTool, CrossModalAlignmentTool.
     - alert_dispatch: SendWebhookTool, SendEmailTool, SendTelegramTool.

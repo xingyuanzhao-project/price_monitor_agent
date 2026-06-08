@@ -9,11 +9,11 @@ nodes:
       model_id: google/gemini-2.5-flash-lite
       temperature: 0.5
       max_tokens: 1024
-      agent_rules:
+      instruction:
         - Provide a concise summary of market conditions
         - Include current price direction and key levels
       retries: 2
-      backoff_multiplier: 1.5
+      retry_waiting_time: 1.5
       termination_conditions:
         - Summary is complete with price analysis
       max_iterations: 3

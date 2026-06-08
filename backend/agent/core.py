@@ -1,11 +1,11 @@
 """
-Core agent implementation with agentic loop, retry logic, and fallback.
+Core agent implementation with agentic loop and retry logic.
 
 What it does:
     Implements the CoreAgent class which runs an agentic loop: calling the LLM,
     processing tool calls via a handler callback, looping until termination
     conditions are met or max iterations reached, with exponential backoff
-    retries and optional fallback model switching on persistent failures.
+    retries on failures.
 
 Entities in it:
     - AgentExecutionError: Exception raised when agent execution fails irrecoverably.
@@ -19,11 +19,13 @@ How used by other modules:
 """
 
 import asyncio
-import json
+import logging
 from typing import Any, Callable, Optional
 
 from backend.agent.llm_provider import LLMProvider, LLMProviderError
 from backend.schema.models import NodeConfig
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class AgentExecutionError(Exception):
@@ -121,52 +123,30 @@ class CoreAgent:
         self.stream_callback = stream_callback
 
     async def execute(self, messages: list[dict], tools: Optional[list[dict]] = None) -> dict:
-        """
-        Run the agentic execution loop.
+        """Run the agentic execution loop.
 
-        Description:
-            Iteratively calls the LLM, processes tool_calls, and accumulates
-            conversation history until termination. Implements retry with
-            exponential backoff on LLM errors and switches to fallback model
-            if retries are exhausted.
-
-        Params:
-            messages (list[dict]): Initial conversation messages.
-            tools (Optional[list[dict]]): Tool definitions for the LLM.
-
-        Returns:
-            dict: Result dictionary with keys:
-                - content (str): Final text response from the agent.
-                - iterations (int): Number of loop iterations completed.
-                - tool_calls_made (list[dict]): Record of all tool calls made.
-                - finish_reason (str): Why the loop terminated.
-
-        Raises:
-            AgentExecutionError: If all retries and fallback are exhausted.
+        Calls the LLM iteratively. Hands the full assistant_message to the
+        execution harness (via tool_call_handler) which produces the ToolRequest
+        structure and dispatches to tools. The harness handles both native
+        tool_calls and non-native text requests.
         """
         conversation_messages = list(messages)
         tool_calls_record: list[dict] = []
         iterations_completed = 0
-        current_provider = self.llm_provider
-        using_fallback = False
 
         for iteration_index in range(self.config.max_iterations):
             iterations_completed = iteration_index + 1
+            _LOGGER.info("[%s] Iteration %d/%d — calling LLM",
+                         self.node_id, iterations_completed, self.config.max_iterations)
 
             llm_response = await self._call_llm_with_retries(
-                current_provider, conversation_messages, tools
+                self.llm_provider, conversation_messages, tools
             )
 
-            if llm_response is None and not using_fallback and self.config.fallback_model_id:
-                current_provider = self._create_fallback_provider()
-                using_fallback = True
-                llm_response = await self._call_llm_with_retries(
-                    current_provider, conversation_messages, tools
-                )
-
             if llm_response is None:
+                _LOGGER.error("[%s] All LLM retries exhausted", self.node_id)
                 raise AgentExecutionError(
-                    "All LLM call attempts failed (retries and fallback exhausted)",
+                    "All LLM call attempts failed (retries exhausted)",
                     node_id=self.node_id,
                     iterations_completed=iterations_completed,
                 )
@@ -188,23 +168,50 @@ class CoreAgent:
                 if asyncio.iscoroutine(stream_result):
                     await stream_result
 
-            if assistant_message.get("tool_calls"):
-                tool_results = await self._process_tool_calls(
-                    assistant_message["tool_calls"], tool_calls_record
-                )
-                conversation_messages.extend(tool_results)
+            # --- Hand full assistant_message to execution harness ---
+            # The harness produces {native_tool_request, non_native_tool_request}
+            # and dispatches to the tool support layer.
+            has_native_tool_calls = bool(assistant_message.get("tool_calls"))
+
+            if has_native_tool_calls:
+                # Native path: LLM produced structured tool_calls
+                _LOGGER.info("[%s] Native tool calls detected", self.node_id)
+                result_messages = await self.tool_call_handler(assistant_message)
+                conversation_messages.extend(result_messages)
+
+                for msg in result_messages:
+                    tool_calls_record.append({"type": "native", "result": msg.get("content", "")})
 
                 if self._check_termination_conditions(assistant_message, tool_calls_record):
-                    content = assistant_message.get("content", "")
                     return {
-                        "content": content,
+                        "content": assistant_message.get("content", ""),
                         "iterations": iterations_completed,
                         "tool_calls_made": tool_calls_record,
                         "finish_reason": "termination_condition",
                     }
+                if self.config.iteration_sleep > 0:
+                    await asyncio.sleep(self.config.iteration_sleep)
                 continue
 
+            elif tools and assistant_message.get("content"):
+                # Non-native path: LLM produced text, tools are available.
+                # Pass to harness — tool layer tries parse_request.
+                result_messages = await self.tool_call_handler(assistant_message)
+                if result_messages:
+                    _LOGGER.info("[%s] Non-native tool match found", self.node_id)
+                    conversation_messages.extend(result_messages)
+
+                    for msg in result_messages:
+                        tool_calls_record.append({"type": "non_native", "result": msg.get("content", "")})
+
+                    if self.config.iteration_sleep > 0:
+                        await asyncio.sleep(self.config.iteration_sleep)
+                    continue
+                # No tool matched — fall through to treat as final answer
+
             content = assistant_message.get("content", "")
+            _LOGGER.info("[%s] Agent finished — reason=%s, iterations=%d, content_length=%d",
+                         self.node_id, finish_reason, iterations_completed, len(content))
             return {
                 "content": content,
                 "iterations": iterations_completed,
@@ -253,67 +260,15 @@ class CoreAgent:
             except LLMProviderError as provider_error:
                 last_error = provider_error
                 if attempt_index < self.config.retries:
-                    backoff_seconds = self.config.backoff_multiplier ** attempt_index
+                    backoff_seconds = self.config.retry_waiting_time ** attempt_index
+                    _LOGGER.warning("[%s] LLM call failed (attempt %d/%d): %s — retrying in %.1fs",
+                                    self.node_id, attempt_index + 1,
+                                    self.config.retries + 1, provider_error,
+                                    backoff_seconds)
                     await asyncio.sleep(backoff_seconds)
 
         _ = last_error
         return None
-
-    async def _process_tool_calls(
-        self, tool_calls: list[dict], tool_calls_record: list[dict]
-    ) -> list[dict]:
-        """
-        Process tool calls from the LLM response by invoking the handler.
-
-        Description:
-            Iterates over tool_calls, invokes each via the tool_call_handler,
-            records the call and result, and constructs tool response messages.
-
-        Params:
-            tool_calls (list[dict]): Tool call objects from the LLM response.
-            tool_calls_record (list[dict]): Accumulator for all tool calls made.
-
-        Returns:
-            list[dict]: Tool response messages to append to conversation.
-
-        Raises:
-            AgentExecutionError: If a tool call handler raises an exception.
-        """
-        tool_response_messages: list[dict] = []
-
-        for tool_call in tool_calls:
-            tool_call_id = tool_call["id"]
-            function_data = tool_call["function"]
-            tool_name = function_data["name"]
-            tool_arguments_str = function_data.get("arguments", "{}")
-
-            try:
-                tool_arguments = json.loads(tool_arguments_str)
-            except json.JSONDecodeError as parse_error:
-                raise AgentExecutionError(
-                    f"Failed to parse tool call arguments for '{tool_name}': {parse_error}. "
-                    f"Raw arguments: {tool_arguments_str}",
-                    node_id=self.node_id,
-                    iterations_completed=0,
-                ) from parse_error
-
-            tool_result = await self.tool_call_handler(tool_name, tool_arguments)
-
-            tool_calls_record.append({
-                "tool_name": tool_name,
-                "arguments": tool_arguments,
-                "result": tool_result,
-            })
-
-            result_content = json.dumps(tool_result, default=str) if not isinstance(tool_result, str) else tool_result
-
-            tool_response_messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": result_content,
-            })
-
-        return tool_response_messages
 
     def _check_termination_conditions(
         self, assistant_message: dict, tool_calls_record: list[dict]
@@ -342,24 +297,3 @@ class CoreAgent:
 
         return False
 
-    def _create_fallback_provider(self) -> LLMProvider:
-        """
-        Create a new LLMProvider instance using the fallback model.
-
-        Description:
-            Constructs a provider with the same API key and settings but
-            using the fallback_model_id from config.
-
-        Params:
-            None
-
-        Returns:
-            LLMProvider: A new provider instance configured with the fallback model.
-        """
-        return LLMProvider(
-            api_key=self.llm_provider.api_key,
-            model_id=self.config.fallback_model_id,
-            temperature=self.config.temperature,
-            max_tokens=self.config.max_tokens,
-            base_url=self.llm_provider.base_url,
-        )

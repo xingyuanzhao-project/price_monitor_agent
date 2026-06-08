@@ -31,10 +31,13 @@ interface WorkflowState {
   schemas: WorkflowSchema[];
   availableModels: string[];
   availableTools: string[];
+  modelsByProvider: Record<string, { id: string; label: string }[]>;
 
   setSchemas: (schemas: WorkflowSchema[]) => void;
   setAvailableModels: (models: string[]) => void;
   setAvailableTools: (tools: string[]) => void;
+  setModelsForProvider: (provider: string, models: { id: string; label: string }[]) => void;
+  fetchModelsForProvider: (provider: string) => Promise<{ id: string; label: string }[]>;
 
   setSchema: (schema: WorkflowSchema) => void;
   clearSchema: () => void;
@@ -130,10 +133,35 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   schemas: [],
   availableModels: [],
   availableTools: [],
+  modelsByProvider: {},
 
   setSchemas: (schemas) => set({ schemas }),
   setAvailableModels: (models) => set({ availableModels: models }),
   setAvailableTools: (tools) => set({ availableTools: tools }),
+  setModelsForProvider: (provider, models) =>
+    set((state) => ({
+      modelsByProvider: { ...state.modelsByProvider, [provider]: models },
+    })),
+  fetchModelsForProvider: async (provider: string): Promise<{ id: string; label: string }[]> => {
+    const cached = get().modelsByProvider[provider];
+    if (cached) return cached;
+    try {
+      const response = await fetch(`/api/models/${encodeURIComponent(provider)}`);
+      if (!response.ok) return [];
+      const data = await response.json();
+      const raw = data.models ?? [];
+      const models: { id: string; label: string }[] = raw.map(
+        (m: { id: string; label: string } | string) =>
+          typeof m === "string" ? { id: m, label: m } : m,
+      );
+      set((state) => ({
+        modelsByProvider: { ...state.modelsByProvider, [provider]: models },
+      }));
+      return models;
+    } catch {
+      return [];
+    }
+  },
 
   setSchema: (schema) =>
     set({

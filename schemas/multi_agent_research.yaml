@@ -9,11 +9,11 @@ nodes:
       model_id: google/gemini-2.5-flash-lite
       temperature: 0.5
       max_tokens: 1024
-      agent_rules:
+      instruction:
         - Define research scope and key questions
         - Provide clear direction for downstream analysts
       retries: 2
-      backoff_multiplier: 1.5
+      retry_waiting_time: 1.5
       termination_conditions:
         - Research plan has at least 3 investigation areas
       max_iterations: 3
@@ -27,11 +27,11 @@ nodes:
       model_id: google/gemini-2.5-flash-lite
       temperature: 0.6
       max_tokens: 4096
-      agent_rules:
+      instruction:
         - Each analyst focuses on their assigned topic
         - Provide evidence-based conclusions
       retries: 2
-      backoff_multiplier: 1.5
+      retry_waiting_time: 1.5
       termination_conditions:
         - Analysis is complete with supporting evidence
       max_iterations: 5
@@ -52,11 +52,11 @@ nodes:
       model_id: google/gemini-2.5-flash-lite
       temperature: 0.4
       max_tokens: 4096
-      agent_rules:
+      instruction:
         - Synthesize all analyst findings into a coherent report
         - Highlight areas of agreement and disagreement
       retries: 2
-      backoff_multiplier: 1.5
+      retry_waiting_time: 1.5
       termination_conditions:
         - Report includes executive summary and detailed findings
       max_iterations: 3

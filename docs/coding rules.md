@@ -72,3 +72,10 @@ If the user instructs to add a functionality, they should be correctly handled u
 Instead, all tests must be end to end. Real values need to be passed in and tested. The input and output should represent real usage scenarios.
 
 - Hard forbidden on workarounds, hacks, dirty code, shortcuts, and other tricks. All solutions must be elegant AND maintainable.
+
+## Produdct/UX/Behavior:
+
+- Reduce the usage of free input text box. this is entirely unreliable for user, and entirely defeated the purpose of this project. It is not good for beginner users.
+
+
+

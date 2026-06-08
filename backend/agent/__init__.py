@@ -21,5 +21,7 @@ How used by other modules:
 """
 
 from backend.agent.llm_provider import LLMProvider, LLMProviderError
+from backend.agent.format_adapter import normalize_request_kwargs
+from backend.agent.localhost_resolver import resolve_localhost_url
 from backend.agent.core import CoreAgent, AgentExecutionError
 from backend.agent.group import AgentGroup

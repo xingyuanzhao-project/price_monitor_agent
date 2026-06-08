@@ -36,11 +36,15 @@ How used by other modules:
 
 import asyncio
 import json
+import logging
 from typing import Any, Callable, Optional
 
 from backend.agent.core import AgentExecutionError, CoreAgent
+
+_LOGGER = logging.getLogger(__name__)
 from backend.agent.llm_provider import LLMProvider
 from backend.harness.context import ContextHarness
+from backend.prompts import load_prompt_template
 from backend.schema.models import AgentGroupConfig, GroupStructure, NodeConfig
 
 
@@ -142,6 +146,7 @@ class AgentGroup:
         shared_state: dict[str, Any] = dict(self.group_config.shared_state)
 
         structure = self.group_config.group_structure
+        _LOGGER.info("[%s] AgentGroup starting — structure=%s", self.node_id, structure.value)
         if structure == GroupStructure.DEFAULT:
             sub_agent_plans, chosen_structure = await self._run_default_planner_phase(
                 messages, shared_state
@@ -152,6 +157,8 @@ class AgentGroup:
             )
             chosen_structure = structure
 
+        _LOGGER.info("[%s] Planner produced %d sub-agents (structure=%s)",
+                     self.node_id, len(sub_agent_plans), chosen_structure.value)
         self._validate_agent_count(len(sub_agent_plans))
 
         if chosen_structure == GroupStructure.PARALLEL:
@@ -207,19 +214,14 @@ class AgentGroup:
             AgentExecutionError: If the LLM returns invalid JSON or missing structure.
         """
         shared_state_summary = json.dumps(shared_state, default=str) if shared_state else "none"
-        planning_prompt = {
-            "role": "system",
-            "content": (
-                f"You are a task planner for a {structure.value} agent group. "
-                f"Decompose the given task into sub-agent assignments for {structure.value} execution. "
-                f"Current shared state: {shared_state_summary}. "
-                "Respond with ONLY valid JSON in this format: "
-                '{"sub_agents": [{"agent_id": "unique_id", "task": "description", '
-                '"focus": "specific focus area", "context_instructions": "system prompt for this sub-agent"}]}. '
-                f"Create between {self.group_config.min_agents} and "
-                f"{self.group_config.max_agents} sub-agents."
-            ),
-        }
+        template = load_prompt_template("group_planner_structured.json")
+        prompt_content = template.format(
+            structure=structure.value,
+            shared_state=shared_state_summary,
+            min_agents=self.group_config.min_agents,
+            max_agents=self.group_config.max_agents,
+        )
+        planning_prompt = {"role": "system", "content": prompt_content}
 
         planner_messages = [planning_prompt] + list(messages)
 
@@ -264,21 +266,13 @@ class AgentGroup:
             AgentExecutionError: If the LLM returns invalid JSON or invalid structure.
         """
         shared_state_summary = json.dumps(shared_state, default=str) if shared_state else "none"
-        planning_prompt = {
-            "role": "system",
-            "content": (
-                "You are a task planner with full authority over execution structure. "
-                "First decide whether parallel, sequential, or pyramid execution best fits "
-                "the task, then decompose into sub-agent assignments. "
-                f"Current shared state: {shared_state_summary}. "
-                "Respond with ONLY valid JSON in this format: "
-                '{"structure": "parallel|sequential|pyramid", '
-                '"sub_agents": [{"agent_id": "unique_id", "task": "description", '
-                '"focus": "specific focus area", "context_instructions": "system prompt for this sub-agent"}]}. '
-                f"Create between {self.group_config.min_agents} and "
-                f"{self.group_config.max_agents} sub-agents."
-            ),
-        }
+        template = load_prompt_template("group_planner_default.json")
+        prompt_content = template.format(
+            shared_state=shared_state_summary,
+            min_agents=self.group_config.min_agents,
+            max_agents=self.group_config.max_agents,
+        )
+        planning_prompt = {"role": "system", "content": prompt_content}
 
         planner_messages = [planning_prompt] + list(messages)
 
@@ -602,7 +596,7 @@ class AgentGroup:
         # context with the planner's instructions and the current shared state.
         sub_agent_harness = ContextHarness(
             system_prompt=context_instructions,
-            agent_rules=self.config.agent_rules,
+            instruction=self.config.instruction,
             token_budget=self.config.token_budget,
             scope_window=self.config.scope_window,
             guardrail_rules=[],

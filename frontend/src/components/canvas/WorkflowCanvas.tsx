@@ -28,16 +28,23 @@ import { NodeType, EdgeType, GroupStructure } from "../../types/schema";
 import type { NodeConfig } from "../../types/schema";
 
 const DEFAULT_NODE_CONFIG: NodeConfig = {
+  provider: "openrouter",
   model_id: "",
   temperature: 0.7,
   max_tokens: null,
   response_format: null,
-  agent_rules: [],
+  instruction: [],
   retries: 2,
-  backoff_multiplier: 1.5,
-  fallback_model_id: null,
+  retry_waiting_time: 1.5,
   termination_conditions: [],
   max_iterations: 10,
+  iteration_sleep: 0,
+  token_budget: 32768,
+  scope_window: 5,
+  tools: [],
+  call_budget: 50,
+  rate_limit_per_minute: 30,
+  few_shot_examples: [],
 };
 
 const NODE_TYPE_LABELS: Record<NodeType, string> = {

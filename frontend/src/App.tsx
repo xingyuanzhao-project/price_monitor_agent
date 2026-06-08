@@ -25,14 +25,14 @@ export default function App() {
   const setAvailableTools = useWorkflowStore((storeState) => storeState.setAvailableTools);
 
   const loadInitialData = useCallback(async () => {
-    const [schemas, models, tools] = await Promise.all([
+    const [schemasResult, modelsResult, toolsResult] = await Promise.allSettled([
       schemasApi.list(),
       modelsApi.list(),
       modelsApi.listTools(),
     ]);
-    setSchemas(schemas);
-    setAvailableModels(models);
-    setAvailableTools(tools);
+    if (schemasResult.status === "fulfilled") setSchemas(schemasResult.value);
+    if (modelsResult.status === "fulfilled") setAvailableModels(modelsResult.value);
+    if (toolsResult.status === "fulfilled") setAvailableTools(toolsResult.value);
   }, [setSchemas, setAvailableModels, setAvailableTools]);
 
   useEffect(() => {

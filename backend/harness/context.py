@@ -79,8 +79,8 @@ class ContextHarness:
     """Prompt assembler with token-budget management and guardrail enforcement.
 
     Attributes:
-        system_prompt: Fixed system-level instruction for the LLM.
-        agent_rules: Additional behavioural rules appended to the system message.
+        system_prompt: Developer-level system instruction (empty for regular nodes).
+        instruction: User-created instruction prompts sent as user-role messages.
         token_budget: Maximum number of tokens for the assembled message list.
         scope_window: Maximum number of few-shot examples to retain.
         state: Mutable key/value store carried across invocations.
@@ -98,7 +98,7 @@ class ContextHarness:
     def __init__(
         self,
         system_prompt: str,
-        agent_rules: list[str],
+        instruction: list[str],
         token_budget: int,
         scope_window: int,
         guardrail_rules: list[str],
@@ -108,8 +108,8 @@ class ContextHarness:
         """Initialise the context harness.
 
         Args:
-            system_prompt: System-level instruction for the LLM.
-            agent_rules: Behavioural rules appended to the system message.
+            system_prompt: Developer-level system instruction (empty for regular nodes).
+            instruction: User-created instruction prompts from the node config.
             token_budget: Token ceiling (1 token ≈ 4 chars).
             scope_window: How many recent few-shot examples to keep.
             guardrail_rules: Raw strings in ``"scope:rule_type:value"`` format.
@@ -121,7 +121,7 @@ class ContextHarness:
             ValueError: If any guardrail string is malformed.
         """
         self.system_prompt = system_prompt
-        self.agent_rules = list(agent_rules)
+        self.instruction = list(instruction)
         self.token_budget = token_budget
         self.scope_window = scope_window
         self.state: dict[str, Any] = dict(state) if state else {}
@@ -149,14 +149,16 @@ class ContextHarness:
         """
         messages: list[dict[str, Any]] = []
 
-        # 1. System message (never truncated)
-        system_content = self.system_prompt
-        if self.agent_rules:
-            rules_block = "\n".join(f"- {rule}" for rule in self.agent_rules)
-            system_content += f"\n\nRules:\n{rules_block}"
-        messages.append({"role": "system", "content": system_content})
+        # 1. System message (developer-level, only if explicitly set)
+        if self.system_prompt:
+            messages.append({"role": "system", "content": self.system_prompt})
 
-        # 2. Few-shot examples (windowed, never truncated)
+        # 2. User instruction prompt (from node config "Prompts" field)
+        if self.instruction:
+            instruction_text = "\n".join(f"- {item}" for item in self.instruction)
+            messages.append({"role": "user", "content": instruction_text})
+
+        # 3. Few-shot examples (windowed, never truncated)
         windowed_examples = self.few_shot_examples[-self.scope_window :]
         for example in windowed_examples:
             if "user" in example:
@@ -164,8 +166,10 @@ class ContextHarness:
             if "assistant" in example:
                 messages.append({"role": "assistant", "content": example["assistant"]})
 
-        # 3. Compute fixed-cost tokens (system + examples + tool results + task)
-        fixed_tokens = _estimate_tokens(system_content) + _estimate_tokens(user_task)
+        # 4. Compute fixed-cost tokens (system + instruction + examples + tool results + task)
+        fixed_tokens = _estimate_tokens(self.system_prompt) + _estimate_tokens(user_task)
+        if self.instruction:
+            fixed_tokens += _estimate_tokens("\n".join(self.instruction))
         for ex in windowed_examples:
             fixed_tokens += _estimate_tokens(ex.get("user", ""))
             fixed_tokens += _estimate_tokens(ex.get("assistant", ""))
@@ -174,7 +178,7 @@ class ContextHarness:
 
         remaining_budget = max(0, self.token_budget - fixed_tokens)
 
-        # 4. Truncate upstream data (largest first) to fit remaining budget
+        # 5. Truncate upstream data (largest first) to fit remaining budget
         if upstream_data:
             data_items = [(key, str(val)) for key, val in upstream_data.items()]
             total_data_tokens = sum(_estimate_tokens(v) for _, v in data_items)
@@ -201,7 +205,7 @@ class ContextHarness:
                         "content": f"[Upstream data from {key}]:\n{value}",
                     })
 
-        # 5. Tool results (never truncated)
+        # 6. Tool results (never truncated)
         for result in tool_results:
             messages.append({
                 "role": "tool",
@@ -209,7 +213,7 @@ class ContextHarness:
                 "content": str(result.get("content", "")),
             })
 
-        # 6. User task (never truncated)
+        # 7. User task (never truncated)
         messages.append({"role": "user", "content": user_task})
 
         return messages

@@ -438,7 +438,7 @@ class SchemaValidator:
 
         Description:
             When a source node specifies a response_format and a target node
-            specifies expected input via agent_rules, checks whether the declared
+            specifies expected input via instruction, checks whether the declared
             output type of the source is compatible with what the target expects.
             Reports a warning-level error when both nodes declare incompatible
             response_format types.

@@ -11,7 +11,7 @@ Entities in it:
     - BaseTool: Abstract base class defining the tool contract.
 
 How used by other modules:
-    - All concrete tool classes (data_acquisition, technical_analysis, etc.)
+    - All concrete tool classes (data_acquisition, financial_analysis, etc.)
       inherit from BaseTool and implement its abstract interface.
     - The ToolRegistry expects BaseTool instances for registration.
     - The agent execution loop calls inject_credentials() before tool invocation
@@ -19,7 +19,20 @@ How used by other modules:
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Any
+
+
+@dataclass
+class ToolResult:
+    """Structured return value from tool execution.
+
+    The tool support layer returns this so the harness knows the data type
+    and can decide whether to inline or write an artifact.
+    """
+    data_type: str
+    content: Any
+    size_bytes: int = 0
 
 
 class ToolExecutionError(Exception):
@@ -174,6 +187,19 @@ class BaseTool(ABC):
             None
         """
         self._credentials = credentials
+
+    def parse_request(self, text: str) -> dict | None:
+        """Parse a natural language request into canonical tool arguments.
+
+        The tool support layer uses this for the non-native path: when the LLM
+        produced text instead of a structured tool_calls block, the tool tries
+        to extract actionable parameters from the text using keyword matching
+        or other heuristics.
+
+        Returns None if this tool cannot handle the text.
+        Subclasses override to implement source-specific parsing.
+        """
+        return None
 
     @property
     def credentials(self) -> dict[str, Any]:

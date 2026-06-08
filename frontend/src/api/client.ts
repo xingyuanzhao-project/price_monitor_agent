@@ -9,7 +9,10 @@
 import type {
   WorkflowSchema,
   UserSettings,
-  ProviderKeyStatus,
+  ProviderStatusResponse,
+  ApiKeyTestResponse,
+  LocalEndpointTestResponse,
+  DataSourcesResponse,
   RunRecord,
   RunEvent,
 } from "../types/schema";
@@ -81,7 +84,7 @@ export const runsApi = {
   streamEvents(
     runId: string,
     onEvent: (event: RunEvent) => void,
-    onError: (error: Error) => void
+    onDone: () => void
   ): EventSource {
     const source = new EventSource(
       `${API_BASE}/runs/${encodeURIComponent(runId)}/events`
@@ -91,8 +94,8 @@ export const runsApi = {
       onEvent(event);
     };
     source.onerror = () => {
-      onError(new Error(`SSE connection lost for run ${runId}`));
       source.close();
+      onDone();
     };
     return source;
   },
@@ -114,14 +117,59 @@ export const settingsApi = {
     });
   },
 
-  providerStatus(): Promise<ProviderKeyStatus[]> {
+  providerStatus(): Promise<ProviderStatusResponse> {
     return request("/settings/provider-status");
   },
 
-  setApiKey(providerName: string, apiKey: string): Promise<ProviderKeyStatus[]> {
+  setApiKey(providerName: string, apiKey: string): Promise<ProviderStatusResponse> {
     return request("/settings/api-key", {
       method: "POST",
       body: JSON.stringify({ provider_name: providerName, api_key: apiKey }),
+    });
+  },
+
+  testApiKey(providerName: string, apiKey: string): Promise<ApiKeyTestResponse> {
+    return request("/settings/api-key/test", {
+      method: "POST",
+      body: JSON.stringify({ provider_name: providerName, api_key: apiKey }),
+    });
+  },
+
+  setLocalEndpoint(providerName: string, apiBase: string): Promise<ProviderStatusResponse> {
+    return request("/settings/local-endpoint", {
+      method: "POST",
+      body: JSON.stringify({ provider_name: providerName, api_base: apiBase }),
+    });
+  },
+
+  testLocalEndpoint(apiBase: string): Promise<LocalEndpointTestResponse> {
+    return request("/settings/local-endpoint/test", {
+      method: "POST",
+      body: JSON.stringify({ api_base: apiBase }),
+    });
+  },
+
+  getDataSources(): Promise<DataSourcesResponse> {
+    return request("/settings/data-sources");
+  },
+
+  togglePublicSource(sourceId: string, enabled: boolean): Promise<void> {
+    return request("/settings/data-sources/public/toggle", {
+      method: "POST",
+      body: JSON.stringify({ source_id: sourceId, enabled }),
+    });
+  },
+
+  addAdditionalApi(sourceId: string, apiKey: string, baseUrl: string = ""): Promise<void> {
+    return request("/settings/data-sources/additional", {
+      method: "POST",
+      body: JSON.stringify({ source_id: sourceId, api_key: apiKey, base_url: baseUrl }),
+    });
+  },
+
+  removeAdditionalApi(sourceId: string): Promise<void> {
+    return request(`/settings/data-sources/additional/${encodeURIComponent(sourceId)}`, {
+      method: "DELETE",
     });
   },
 };
@@ -134,7 +182,24 @@ export const modelsApi = {
     return data.providers.flatMap((provider) => provider.models ?? []);
   },
 
-  listTools(): Promise<string[]> {
-    return request("/models/tools");
+  async listForProvider(providerName: string): Promise<string[]> {
+    const data = await request<{
+      provider_name: string;
+      models: string[];
+      error: string | null;
+    }>(`/models/${encodeURIComponent(providerName)}`);
+    return data.models ?? [];
+  },
+
+  async listTools(): Promise<string[]> {
+    const data = await request<{
+      tools: Array<{ type: string; function: { name: string } }>;
+    }>("/models/tools");
+    return data.tools.map((t) => t.function.name);
   },
 };
+
+
+export function openRunLogStream(runId: string): EventSource {
+  return new EventSource(`${API_BASE}/runs/${encodeURIComponent(runId)}/logs/stream`);
+}

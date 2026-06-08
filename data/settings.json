@@ -3,7 +3,7 @@
   "llm_providers": [
     {
       "provider_name": "openrouter",
-      "base_url": "https://openrouter.ai/api/v1",
+      "base_url": "",
       "api_key_env": "OPENROUTER_API_KEY",
       "available_models": []
     }

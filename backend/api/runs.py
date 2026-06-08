@@ -28,6 +28,12 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from backend.orchestration.executor import WorkflowExecutor
+from backend.run_log_handler import (
+    activate_run,
+    deactivate_run,
+    get_log_file_path,
+    get_log_queue,
+)
 from backend.schema.persistence import SchemaPersistence
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -108,8 +114,9 @@ async def start_run(request: StartRunRequest) -> dict[str, Any]:
 
     async def run_task() -> None:
         """Background coroutine that drives the executor and signals completion."""
+        activate_run(run_id)
         try:
-            await _executor.execute_workflow(schema, event_callback)
+            await _executor.execute_workflow(schema, event_callback, run_id=run_id)
         except Exception as execution_error:
             await queue.put(_make_event(
                 run_id=run_id,
@@ -118,7 +125,9 @@ async def start_run(request: StartRunRequest) -> dict[str, Any]:
                 data={"error": str(execution_error)},
             ))
         finally:
+            deactivate_run(run_id)
             await queue.put(None)
+            _event_queues.pop(run_id, None)
 
     asyncio.create_task(run_task())
 
@@ -135,36 +144,85 @@ async def start_run(request: StartRunRequest) -> dict[str, Any]:
 
 @router.get("/{run_id}/events")
 async def stream_events(run_id: str) -> EventSourceResponse:
-    """Stream execution events for an active run via SSE.
+    """Stream execution events for a run via SSE.
 
-    The connection stays open until the run terminates (``run_complete``
-    or ``run_error`` event), after which the server closes the stream.
+    If the run is still active, streams from the live queue.
+    If the run already completed (queue drained), replays stored events
+    from the RunRecord.
 
     Args:
         run_id: Unique identifier of the run to stream.
 
     Returns:
-        An ``EventSourceResponse`` yielding JSON-encoded event dicts, each
-        shaped as ``{event_id, run_id, node_id, event_type, timestamp, data}``.
+        An ``EventSourceResponse`` yielding JSON-encoded event dicts.
 
     Raises:
-        HTTPException 404: If there is no active run queue for *run_id*.
+        HTTPException 404: If run_id is unknown.
     """
     queue = _event_queues.get(run_id)
-    if queue is None:
-        raise HTTPException(
-            404, detail=f"No active run found for run_id '{run_id}'"
-        )
 
     async def event_generator():
-        """Yield SSE data frames until the run completes."""
-        while True:
-            event = await queue.get()
-            if event is None:
-                break
-            yield {"data": json.dumps(event, default=str)}
+        """Yield SSE data frames from live queue or stored record."""
+        if queue is not None:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                yield {"data": json.dumps(event, default=str)}
+        else:
+            record = _executor.get_run_record(run_id) if _executor else None
+            if record is None:
+                return
+            for raw_event in record.events:
+                normalised = _normalise_event(raw_event, run_id)
+                yield {"data": json.dumps(normalised, default=str)}
+
+    if queue is None:
+        try:
+            _executor.get_run_record(run_id)
+        except (KeyError, AttributeError):
+            raise HTTPException(
+                404, detail=f"No run found for run_id '{run_id}'"
+            )
 
     return EventSourceResponse(event_generator())
+
+
+@router.get("/{run_id}/logs/stream")
+async def stream_run_logs(run_id: str) -> EventSourceResponse:
+    """Stream log lines for run_id as Server-Sent Events.
+
+    Emits named events:
+        - "log": one per log record, data is the formatted log line.
+        - "status": emitted once when the run finishes, data is "done".
+
+    If the run already completed, replays log lines from the on-disk file.
+    """
+    log_queue = get_log_queue(run_id)
+    log_file = get_log_file_path(run_id)
+
+    if log_queue is None and log_file is None:
+        raise HTTPException(
+            404, detail=f"No logs available for run_id '{run_id}'"
+        )
+
+    async def log_generator():
+        if log_queue is not None:
+            while True:
+                line = await log_queue.get()
+                if line is None:
+                    yield {"event": "status", "data": "done"}
+                    return
+                yield {"event": "log", "data": line}
+        elif log_file is not None:
+            with log_file.open("r", encoding="utf-8", errors="replace") as fh:
+                for raw_line in fh:
+                    stripped = raw_line.rstrip("\n")
+                    if stripped:
+                        yield {"event": "log", "data": stripped}
+            yield {"event": "status", "data": "done"}
+
+    return EventSourceResponse(log_generator())
 
 
 @router.get("/")

@@ -19,10 +19,15 @@ How used by other modules:
 """
 
 from backend.settings.models import (
+    CLOUD_PROVIDER_API_BASE,
+    LOCAL_ENDPOINT_ENV_VAR,
+    LOCAL_PROVIDERS,
+    PROVIDER_AUTH_TEST_URLS,
     PROVIDER_DEFAULT_ENV_VAR,
     APICredential,
     LLMProviderConfig,
     UserSettings,
     resolve_provider_api_key,
+    resolve_provider_base_url,
 )
 from backend.settings.persistence import SettingsPersistence

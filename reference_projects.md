@@ -1,8 +1,8 @@
 there are 2 projects that are related to this project:
 
-1. /Users/xingyuanzhao/Documents/projects/price_monitor
+1. C:\Users\meier\OneDrive\Documents\price_monitor
 https://github.com/xingyuanzhao-project/price_monitor
-2. /Users/xingyuanzhao/Documents/projects/nocode-workflow
+2. C:\Users\meier\nocode-workflow
 https://github.com/xingyuanzhao-project/nocode-workflow
 
 price monitor is the prototype of this project, which is offline and not in production and only applied to very limited sources and not agentic, but has the general idea and plasn for price monitor agents.

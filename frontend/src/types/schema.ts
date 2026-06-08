@@ -38,17 +38,45 @@ export interface WorkflowConfig {
   dead_loop_detection: boolean;
 }
 
+export type OutputFieldDataType = "string" | "binary" | "category" | "numeric" | "integer";
+
+export interface OutputFieldRow {
+  field_name: string;
+  data_type: OutputFieldDataType;
+  required: boolean;
+  options: string[];
+  range_start: string;
+  range_end: string;
+  step: string;
+}
+
+export type AnyProviderName =
+  | "openrouter"
+  | "openai"
+  | "anthropic"
+  | "google"
+  | "ollama"
+  | "vllm"
+  | "llama_cpp";
+
 export interface NodeConfig {
+  provider: AnyProviderName;
   model_id: string;
   temperature: number;
   max_tokens: number | null;
   response_format: Record<string, unknown> | null;
-  agent_rules: string[];
+  instruction: string[];
   retries: number;
-  backoff_multiplier: number;
-  fallback_model_id: string | null;
+  retry_waiting_time: number;
   termination_conditions: string[];
   max_iterations: number;
+  iteration_sleep: number;
+  token_budget: number;
+  scope_window: number;
+  tools: string[];
+  call_budget: number;
+  rate_limit_per_minute: number;
+  few_shot_examples: { role: string; content: string }[];
 }
 
 export interface AgentGroupConfig {
@@ -102,6 +130,56 @@ export interface ProviderKeyStatus {
   api_key_env: string;
   configured: boolean;
   masked_key: string;
+}
+
+export interface LocalEndpointStatus {
+  provider_name: string;
+  api_base: string;
+  configured: boolean;
+}
+
+export interface ProviderStatusResponse {
+  cloud_providers: ProviderKeyStatus[];
+  local_endpoints: LocalEndpointStatus[];
+}
+
+export interface ApiKeyTestResponse {
+  provider_name: string;
+  valid: boolean;
+  message: string;
+}
+
+export interface LocalEndpointTestResponse {
+  reachable: boolean;
+  models: string[];
+  message: string;
+}
+
+export interface PublicDataSourceEntry {
+  source_id: string;
+  name: string;
+  base_url: string;
+  description: string;
+}
+
+export interface AdditionalApiSourceEntry {
+  source_id: string;
+  name: string;
+  default_base_url: string;
+  description: string;
+}
+
+export interface ConfiguredAdditionalApi {
+  source_id: string;
+  api_key: string;
+  base_url: string;
+}
+
+export interface DataSourcesResponse {
+  public_sources: Record<string, PublicDataSourceEntry[]>;
+  additional_sources: Record<string, AdditionalApiSourceEntry[]>;
+  enabled_public: string[];
+  configured_additional: ConfiguredAdditionalApi[];
 }
 
 export interface APICredential {

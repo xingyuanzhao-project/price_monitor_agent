@@ -1,312 +1,381 @@
 """
-Data acquisition tool for fetching market, news, social, and macroeconomic data.
+Data acquisition tool with dispatch to source-specific support modules.
 
-What it does:
-    Provides a single flexible FetchDataTool that supports 14 source types across
-    four categories (market, news, social, macro). The source_type parameter
-    selects the specific data endpoint, required parameters, and defaults.
+Receives ToolRequests from the execution harness:
+- Native path: source_id + source_type + args → dispatch directly
+- Non-native path: text → parse_request extracts source + type + args
 
-Entities in it:
-    - SOURCE_TYPE_DEFINITIONS: Dictionary mapping source type names to their
-      category, required parameters, optional parameters, and default values.
-    - FetchDataTool: Concrete tool implementation for all data fetching operations.
-
-How used by other modules:
-    - Registered in the ToolRegistry at application startup.
-    - Called by agents during workflow execution to retrieve external data.
-    - Credentials are injected by the orchestration layer before execution.
+Each registered source has a support module in backend/tools/supports/ that
+owns the canonical parameter mapping and response normalization.
 """
 
+from __future__ import annotations
+
+import json
+import re
 from typing import Any
 
-import httpx
+from backend.tools.base import BaseTool, ToolExecutionError, ToolResult
+from backend.tools.supports import okx, binance, coingecko, fred, ecb
+from backend.tools.supports import guardian, hackernews, mastodon
+from backend.tools.supports import alphavantage, polygon, finnhub, newsapi, twitter, quandl
+from backend.tools.supports import yahoo, frankfurter, worldbank, imf
+from backend.tools.supports import gdelt, isw, oksurf, wikievents, thehear
+from backend.tools.supports import github_trending, lemmy
+from backend.tools.supports import polymarket, openmeteo, bis, usgs, gdacs, eonet
+from backend.tools.supports import usaspending, comtrade, predscope
 
-from backend.tools.base import BaseTool, ToolExecutionError
 
+# ---------------------------------------------------------------------------
+# Dispatch table: source_id → { source_type → async callable }
+# Each callable is a function from the corresponding support module.
+# ---------------------------------------------------------------------------
 
-SOURCE_TYPE_DEFINITIONS: dict[str, dict[str, Any]] = {
-    "market_ohlcv": {
-        "category": "market",
-        "required_params": ["symbol", "interval"],
-        "optional_params": ["start_date", "end_date", "limit"],
-        "defaults": {"limit": 100},
+DISPATCH: dict[str, dict[str, Any]] = {
+    "okx": {
+        "ticker": okx.fetch_ticker,
+        "ohlcv": okx.fetch_candlesticks,
+        "orderbook": okx.fetch_orderbook,
+        "trades": okx.fetch_trades,
     },
-    "market_orderbook": {
-        "category": "market",
-        "required_params": ["symbol"],
-        "optional_params": ["depth"],
-        "defaults": {"depth": 20},
+    "binance": {
+        "ticker": binance.fetch_ticker,
+        "ohlcv": binance.fetch_candlesticks,
+        "orderbook": binance.fetch_orderbook,
+        "trades": binance.fetch_trades,
     },
-    "market_trades": {
-        "category": "market",
-        "required_params": ["symbol"],
-        "optional_params": ["limit", "start_date", "end_date"],
-        "defaults": {"limit": 100},
+    "coingecko": {
+        "ticker": coingecko.fetch_price,
+        "ohlcv": coingecko.fetch_market_chart,
+        "trending": coingecko.fetch_trending,
     },
-    "market_funding": {
-        "category": "market",
-        "required_params": ["symbol"],
-        "optional_params": ["start_date", "end_date", "limit"],
-        "defaults": {"limit": 50},
+    "fred": {
+        "series": fred.fetch_series_observations,
+        "search": fred.search_series,
+        "info": fred.fetch_series_info,
     },
-    "news_headlines": {
-        "category": "news",
-        "required_params": ["query"],
-        "optional_params": ["language", "limit", "start_date", "end_date"],
-        "defaults": {"language": "en", "limit": 25},
+    "ecb": {
+        "exchange_rates": ecb.fetch_exchange_rates,
+        "interest_rates": ecb.fetch_interest_rates,
     },
-    "news_articles": {
-        "category": "news",
-        "required_params": ["query"],
-        "optional_params": ["language", "limit", "start_date", "end_date", "sources"],
-        "defaults": {"language": "en", "limit": 10},
+    "guardian": {
+        "search": guardian.search_content,
+        "headlines": guardian.fetch_section_headlines,
     },
-    "news_filings": {
-        "category": "news",
-        "required_params": ["ticker"],
-        "optional_params": ["filing_type", "limit", "start_date", "end_date"],
-        "defaults": {"limit": 10},
+    "hackernews": {
+        "top_stories": hackernews.fetch_top_stories,
+        "top_stories_detail": hackernews.fetch_top_stories_detail,
+        "story": hackernews.fetch_item,
     },
-    "social_posts": {
-        "category": "social",
-        "required_params": ["query"],
-        "optional_params": ["platform", "limit", "start_date", "end_date"],
-        "defaults": {"platform": "all", "limit": 50},
+    "mastodon": {
+        "timeline": mastodon.fetch_public_timeline,
+        "hashtag": mastodon.fetch_hashtag_timeline,
+        "search": mastodon.search_accounts,
     },
-    "social_threads": {
-        "category": "social",
-        "required_params": ["thread_id"],
-        "optional_params": ["platform", "include_replies"],
-        "defaults": {"include_replies": True},
+    "alphavantage": {
+        "ohlcv": alphavantage.fetch_daily,
+        "quote": alphavantage.fetch_quote,
+        "crypto": alphavantage.fetch_crypto_exchange_rate,
     },
-    "account_timelines": {
-        "category": "social",
-        "required_params": ["account_handle"],
-        "optional_params": ["platform", "limit", "start_date", "end_date", "include_retweets"],
-        "defaults": {"platform": "all", "limit": 50, "include_retweets": False},
+    "polygon": {
+        "ohlcv": polygon.fetch_aggregates,
+        "quote": polygon.fetch_last_quote,
+        "ticker_details": polygon.fetch_ticker_details,
     },
-    "news_headlines": {
-        "category": "news",
-        "required_params": ["query"],
-        "optional_params": ["language", "limit", "start_date", "end_date"],
-        "defaults": {"language": "en", "limit": 25},
+    "finnhub": {
+        "quote": finnhub.fetch_quote,
+        "news": finnhub.fetch_company_news,
+        "earnings": finnhub.fetch_earnings,
     },
-    "news_articles": {
-        "category": "news",
-        "required_params": ["query"],
-        "optional_params": ["language", "limit", "start_date", "end_date", "sources"],
-        "defaults": {"language": "en", "limit": 10},
+    "newsapi": {
+        "headlines": newsapi.fetch_top_headlines,
+        "search": newsapi.search_everything,
     },
-    "news_filings": {
-        "category": "news",
-        "required_params": ["ticker"],
-        "optional_params": ["filing_type", "limit", "start_date", "end_date"],
-        "defaults": {"limit": 10},
+    "twitter": {
+        "search": twitter.search_recent_tweets,
+        "timeline": twitter.fetch_user_tweets,
     },
-    "earnings_transcripts": {
-        "category": "news",
-        "required_params": ["ticker"],
-        "optional_params": ["limit", "start_date", "end_date", "quarter", "year"],
-        "defaults": {"limit": 5},
+    "quandl": {
+        "dataset": quandl.fetch_dataset,
+        "metadata": quandl.fetch_dataset_metadata,
     },
-    "macro_economic": {
-        "category": "macro",
-        "required_params": ["indicator"],
-        "optional_params": ["country", "start_date", "end_date", "frequency"],
-        "defaults": {"country": "US", "frequency": "monthly"},
+    "yahoo": {
+        "quote": yahoo.fetch_quote,
+        "ohlcv": yahoo.fetch_ohlcv,
     },
-    "macro_onchain": {
-        "category": "macro",
-        "required_params": ["metric", "network"],
-        "optional_params": ["start_date", "end_date", "resolution"],
-        "defaults": {"resolution": "daily"},
+    "frankfurter": {
+        "latest": frankfurter.fetch_latest,
+        "timeseries": frankfurter.fetch_timeseries,
     },
-    "macro_sentiment": {
-        "category": "macro",
-        "required_params": ["asset"],
-        "optional_params": ["metric_type", "start_date", "end_date"],
-        "defaults": {"metric_type": "fear_greed"},
+    "worldbank": {
+        "indicator": worldbank.fetch_indicator,
+        "search": worldbank.search_indicators,
+    },
+    "imf": {
+        "indicator": imf.fetch_indicator,
+        "list": imf.list_indicators,
+    },
+    "gdelt": {
+        "search": gdelt.search_articles,
+        "timeline": gdelt.fetch_timeline,
+    },
+    "isw": {
+        "latest": isw.fetch_latest,
+    },
+    "oksurf": {
+        "headlines": oksurf.fetch_all_headlines,
+        "section": oksurf.fetch_section,
+    },
+    "wikievents": {
+        "latest": wikievents.fetch_latest,
+        "day": wikievents.fetch_day,
+    },
+    "thehear": {
+        "country": thehear.fetch_country,
+    },
+    "github": {
+        "trending": github_trending.fetch_trending,
+        "search": github_trending.search_repos,
+    },
+    "lemmy": {
+        "posts": lemmy.fetch_posts,
+        "search": lemmy.search_posts,
+    },
+    "polymarket": {
+        "markets": polymarket.fetch_markets,
+        "events": polymarket.fetch_events,
+        "search": polymarket.search_markets,
+    },
+    "openmeteo": {
+        "forecast": openmeteo.fetch_forecast,
+        "historical": openmeteo.fetch_historical,
+    },
+    "bis": {
+        "policy_rates": bis.fetch_policy_rates,
+        "exchange_rates": bis.fetch_exchange_rates,
+    },
+    "usgs": {
+        "earthquakes": usgs.fetch_earthquakes,
+    },
+    "gdacs": {
+        "events": gdacs.fetch_events,
+    },
+    "eonet": {
+        "events": eonet.fetch_events,
+        "categories": eonet.fetch_categories,
+    },
+    "usaspending": {
+        "by_agency": usaspending.fetch_spending_by_agency,
+        "over_time": usaspending.fetch_spending_over_time,
+    },
+    "comtrade": {
+        "trade": comtrade.fetch_trade_data,
+    },
+    "predscope": {
+        "markets": predscope.fetch_markets,
+        "resolved": predscope.fetch_resolved,
     },
 }
 
+# Source name aliases for non-native text parsing
+_SOURCE_ALIASES: dict[str, str] = {
+    "okx": "okx", "binance": "binance", "coingecko": "coingecko",
+    "coin gecko": "coingecko", "fred": "fred", "ecb": "ecb",
+    "guardian": "guardian", "the guardian": "guardian",
+    "hacker news": "hackernews", "hackernews": "hackernews", "hn": "hackernews",
+    "mastodon": "mastodon",
+    "alpha vantage": "alphavantage", "alphavantage": "alphavantage",
+    "polygon": "polygon", "polygon.io": "polygon",
+    "finnhub": "finnhub", "newsapi": "newsapi", "news api": "newsapi",
+    "twitter": "twitter", "x": "twitter",
+    "quandl": "quandl", "nasdaq": "quandl", "nasdaq data link": "quandl",
+    "yahoo": "yahoo", "yahoo finance": "yahoo", "yfinance": "yahoo",
+    "frankfurter": "frankfurter", "forex": "frankfurter",
+    "world bank": "worldbank", "worldbank": "worldbank",
+    "imf": "imf", "international monetary fund": "imf",
+    "gdelt": "gdelt",
+    "isw": "isw", "understandingwar": "isw", "institute for the study of war": "isw",
+    "oksurf": "oksurf", "google news": "oksurf",
+    "wikievents": "wikievents", "wikipedia events": "wikievents", "offstream": "wikievents",
+    "thehear": "thehear", "the hear": "thehear",
+    "github": "github", "github trending": "github",
+    "lemmy": "lemmy",
+    "polymarket": "polymarket", "prediction market": "polymarket",
+    "open-meteo": "openmeteo", "openmeteo": "openmeteo", "open meteo": "openmeteo", "weather": "openmeteo",
+    "bis": "bis", "bank for international settlements": "bis",
+    "usgs": "usgs", "earthquake": "usgs",
+    "gdacs": "gdacs", "disaster alert": "gdacs",
+    "eonet": "eonet", "nasa eonet": "eonet", "natural event": "eonet",
+    "usaspending": "usaspending", "usa spending": "usaspending", "federal spending": "usaspending",
+    "comtrade": "comtrade", "un comtrade": "comtrade", "trade flow": "comtrade",
+    "predscope": "predscope",
+}
+
+# Type keywords for non-native text parsing
+_TYPE_KEYWORDS: dict[str, str] = {
+    "candle": "ohlcv", "candlestick": "ohlcv", "ohlcv": "ohlcv", "kline": "ohlcv",
+    "price": "ticker", "ticker": "ticker", "quote": "ticker",
+    "orderbook": "orderbook", "order book": "orderbook", "depth": "orderbook",
+    "trade": "trades", "trades": "trades", "recent trades": "trades",
+    "headline": "headlines", "headlines": "headlines", "news": "headlines",
+    "article": "search", "search": "search",
+    "series": "series", "indicator": "series", "economic": "series",
+    "exchange rate": "exchange_rates",
+    "subreddit": "subreddit", "timeline": "timeline",
+    "top stories": "top_stories", "top": "top_stories",
+}
+
+# Regex for symbol extraction
+_SYMBOL_PATTERN = re.compile(r"\b([A-Z]{2,10}[-/]?[A-Z]{2,10})\b")
+
 
 class FetchDataTool(BaseTool):
-    """
-    Fetches data from external sources across market, news, social, and macro categories.
-
-    Description:
-        A unified data acquisition tool that uses a source_type parameter to
-        select the appropriate endpoint and parameter set. Constructs request
-        URLs from credential-provided base endpoints and handles authentication
-        headers automatically.
-
-    Attributes:
-        _credentials: Injected credentials containing source_endpoint and auth_token.
-
-    Methods:
-        name: Returns 'fetch_data'.
-        description: Returns the tool's purpose description.
-        parameters_schema: Returns JSON schema with source_type and dynamic params.
-        execute: Fetches data from the external source with given parameters.
-    """
+    """Fetches data from external sources via source-specific support modules."""
 
     @property
     def name(self) -> str:
-        """
-        Unique name for this tool.
-
-        Description:
-            Returns the canonical name used for registry lookup and LLM tool calls.
-
-        Params:
-            None
-
-        Returns:
-            str: 'fetch_data'
-        """
         return "fetch_data"
 
     @property
     def description(self) -> str:
-        """
-        Human-readable description of this tool.
-
-        Description:
-            Explains what the tool does and the range of data sources available.
-
-        Params:
-            None
-
-        Returns:
-            str: Description string.
-        """
         return (
-            "Fetches data from external sources. Supports 12 source types across "
-            "market (ohlcv, orderbook, trades, funding), news (headlines, articles, "
-            "filings), social (posts, threads), and macro (economic, onchain, sentiment) "
-            "categories."
+            "Fetches data from external sources. Specify source_id (e.g. 'okx', "
+            "'binance', 'fred') and source_type (e.g. 'ohlcv', 'ticker', 'series') "
+            "along with source-specific parameters like symbol or query."
         )
 
     @property
     def parameters_schema(self) -> dict:
-        """
-        JSON Schema for the execute() parameters.
-
-        Description:
-            Defines source_type as a required enum parameter and includes all
-            possible optional parameters from all source type definitions.
-
-        Params:
-            None
-
-        Returns:
-            dict: JSON Schema dictionary.
-        """
         return {
             "type": "object",
             "properties": {
+                "source_id": {
+                    "type": "string",
+                    "enum": list(DISPATCH.keys()),
+                    "description": "Which data source to fetch from",
+                },
                 "source_type": {
                     "type": "string",
-                    "enum": list(SOURCE_TYPE_DEFINITIONS.keys()),
-                    "description": "The type of data source to fetch from",
+                    "description": "Type of data to fetch (e.g. 'ohlcv', 'ticker', 'search')",
                 },
-                "symbol": {"type": "string", "description": "Trading pair symbol"},
-                "interval": {"type": "string", "description": "Candle interval (e.g., '1h', '1d')"},
+                "symbol": {"type": "string", "description": "Trading pair or asset symbol"},
+                "interval": {"type": "string", "description": "Candle interval (e.g. '1h', '1d')"},
+                "limit": {"type": "integer", "description": "Max records to return"},
                 "query": {"type": "string", "description": "Search query string"},
-                "ticker": {"type": "string", "description": "Stock/asset ticker symbol"},
-                "thread_id": {"type": "string", "description": "Social thread identifier"},
-                "indicator": {"type": "string", "description": "Economic indicator name"},
-                "metric": {"type": "string", "description": "On-chain metric name"},
-                "network": {"type": "string", "description": "Blockchain network name"},
-                "asset": {"type": "string", "description": "Asset name for sentiment data"},
-                "start_date": {"type": "string", "description": "Start date (ISO 8601)"},
-                "end_date": {"type": "string", "description": "End date (ISO 8601)"},
-                "limit": {"type": "integer", "description": "Maximum records to return"},
-                "depth": {"type": "integer", "description": "Orderbook depth levels"},
-                "language": {"type": "string", "description": "Language code (e.g., 'en')"},
-                "sources": {"type": "string", "description": "Comma-separated source names"},
-                "filing_type": {"type": "string", "description": "SEC filing type (e.g., '10-K')"},
-                "platform": {"type": "string", "description": "Social platform filter"},
-                "include_replies": {"type": "boolean", "description": "Whether to include replies"},
-                "country": {"type": "string", "description": "Country code"},
-                "frequency": {"type": "string", "description": "Data frequency"},
-                "resolution": {"type": "string", "description": "Data resolution"},
-                "metric_type": {"type": "string", "description": "Sentiment metric type"},
+                "indicator": {"type": "string", "description": "Economic indicator ID"},
             },
-            "required": ["source_type"],
+            "required": ["source_id", "source_type"],
         }
 
-    async def execute(self, **kwargs: Any) -> dict:
+    def parse_request(self, text: str) -> dict | None:
+        """Parse natural language text into canonical fetch_data arguments.
+
+        Looks for source name keywords, data type keywords, and symbol patterns.
+        Returns None if unable to determine at minimum a source_id and source_type.
         """
-        Fetch data from the specified external source.
+        text_lower = text.lower()
 
-        Description:
-            Validates the source_type, checks required parameters, applies defaults,
-            constructs the request URL from credentials, and performs the HTTP request
-            with authentication. Returns the response data.
+        source_id = None
+        for alias, sid in _SOURCE_ALIASES.items():
+            if alias in text_lower:
+                source_id = sid
+                break
 
-        Params:
-            **kwargs (Any): Must include source_type plus all required params for that type.
+        if source_id is None:
+            return None
 
-        Returns:
-            dict: The response data from the external source.
+        source_type = None
+        for keyword, stype in _TYPE_KEYWORDS.items():
+            if keyword in text_lower:
+                if stype in DISPATCH.get(source_id, {}):
+                    source_type = stype
+                    break
 
-        Raises:
-            ToolExecutionError: If source_type is invalid, required params are missing,
-                credentials are not injected, or the HTTP request fails.
-        """
+        if source_type is None:
+            available_types = list(DISPATCH.get(source_id, {}).keys())
+            if available_types:
+                source_type = available_types[0]
+            else:
+                return None
+
+        args: dict[str, Any] = {"source_id": source_id, "source_type": source_type}
+
+        symbol_match = _SYMBOL_PATTERN.search(text)
+        if symbol_match:
+            args["symbol"] = symbol_match.group(1)
+
+        return args
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        """Dispatch to the correct support module and return a ToolResult."""
+        source_id = kwargs.get("source_id")
         source_type = kwargs.get("source_type")
-        if source_type not in SOURCE_TYPE_DEFINITIONS:
+
+        if not source_id or source_id not in DISPATCH:
             raise ToolExecutionError(
-                f"Unsupported source_type: '{source_type}'. "
-                f"Must be one of: {list(SOURCE_TYPE_DEFINITIONS.keys())}"
+                f"Unknown source_id: '{source_id}'. Available: {list(DISPATCH.keys())}"
             )
 
-        definition = SOURCE_TYPE_DEFINITIONS[source_type]
-        category = definition["category"]
-        required_params = definition["required_params"]
-        defaults = definition["defaults"]
-
-        missing_params = [
-            param for param in required_params if param not in kwargs or kwargs[param] is None
-        ]
-        if missing_params:
+        source_dispatch = DISPATCH[source_id]
+        if not source_type or source_type not in source_dispatch:
             raise ToolExecutionError(
-                f"Missing required parameters for source_type '{source_type}': {missing_params}"
+                f"Unknown source_type '{source_type}' for source '{source_id}'. "
+                f"Available: {list(source_dispatch.keys())}"
             )
 
-        source_endpoint = self.credentials.get("source_endpoint")
-        if not source_endpoint:
-            raise ToolExecutionError(
-                "No 'source_endpoint' found in credentials. "
-                "Credentials must be injected before calling fetch_data."
-            )
+        handler_fn = source_dispatch[source_type]
 
-        auth_token = self.credentials.get("auth_token")
-        if not auth_token:
-            raise ToolExecutionError(
-                "No 'auth_token' found in credentials. "
-                "Credentials must be injected before calling fetch_data."
-            )
+        call_kwargs = {k: v for k, v in kwargs.items() if k not in ("source_id", "source_type") and v is not None}
 
-        request_params = dict(defaults)
-        all_known_params = set(required_params) | set(definition["optional_params"])
-        for param_name in all_known_params:
-            if param_name in kwargs and kwargs[param_name] is not None:
-                request_params[param_name] = kwargs[param_name]
-
-        url = f"{source_endpoint.rstrip('/')}/{category}/{source_type}"
-        headers = {"Authorization": f"Bearer {auth_token}"}
+        # Map generic parameter names to source-specific ones
+        call_kwargs = self._map_params(source_id, source_type, call_kwargs)
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url, params=request_params, headers=headers)
-                if response.status_code != 200:
-                    raise ToolExecutionError(
-                        f"HTTP {response.status_code} from {url}: {response.text}"
-                    )
-                return response.json()
-        except httpx.HTTPError as http_error:
+            raw_result = await handler_fn(**call_kwargs)
+        except TypeError as e:
             raise ToolExecutionError(
-                f"HTTP request failed for source_type '{source_type}' at {url}: {http_error}"
-            ) from http_error
+                f"Parameter mismatch calling {source_id}.{source_type}: {e}. "
+                f"Provided: {list(call_kwargs.keys())}"
+            ) from e
+        except Exception as e:
+            raise ToolExecutionError(
+                f"Error fetching from {source_id}/{source_type}: {e}"
+            ) from e
+
+        data_type = f"{source_id}_{source_type}"
+        size_bytes = len(json.dumps(raw_result, default=str).encode("utf-8"))
+
+        return ToolResult(data_type=data_type, content=raw_result, size_bytes=size_bytes)
+
+    @staticmethod
+    def _map_params(source_id: str, source_type: str, params: dict) -> dict:
+        """Map generic parameter names to source-specific ones."""
+        mapped = dict(params)
+
+        if source_id == "okx":
+            if "symbol" in mapped:
+                mapped["inst_id"] = mapped.pop("symbol")
+            if "interval" in mapped:
+                mapped["bar"] = mapped.pop("interval")
+            if source_type == "orderbook" and "limit" in mapped:
+                mapped["depth"] = mapped.pop("limit")
+        elif source_id == "binance" and "symbol" in mapped:
+            mapped["symbol"] = mapped["symbol"].replace("-", "")
+        elif source_id == "coingecko" and "symbol" in mapped:
+            mapped["coin_id"] = mapped.pop("symbol")
+        elif source_id == "ecb" and "symbol" in mapped:
+            mapped["currency"] = mapped.pop("symbol")
+
+        if source_id == "fred" and "indicator" in mapped:
+            mapped["series_id"] = mapped.pop("indicator")
+
+        if source_id == "mastodon" and source_type == "hashtag" and "query" in mapped:
+            mapped["tag"] = mapped.pop("query")
+
+        if source_id == "hackernews" and source_type == "story" and "symbol" in mapped:
+            mapped["item_id"] = int(mapped.pop("symbol"))
+
+        if source_id == "frankfurter" and "symbol" in mapped:
+            mapped["base"] = mapped.pop("symbol")
+
+        return mapped

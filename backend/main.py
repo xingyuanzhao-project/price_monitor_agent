@@ -30,19 +30,28 @@ from backend.api import models as models_router
 from backend.api import runs as runs_router
 from backend.api import schemas as schemas_router
 from backend.api import settings as settings_router
+from backend.run_log_handler import install_handler as install_run_log_handler
 from backend.orchestration.executor import WorkflowExecutor
 from backend.schema.persistence import SchemaPersistence
 from backend.schema.validation import SchemaValidator
+from backend.server_settings import get_server_settings
 from backend.settings.models import PROVIDER_DEFAULT_ENV_VAR, LLMProviderConfig, UserSettings
 from backend.settings.persistence import SettingsPersistence
 from backend.tools.alert_dispatch import SendEmailTool, SendTelegramTool, SendWebhookTool
 from backend.tools.data_acquisition import FetchDataTool
 from backend.tools.write_output import WriteOutputTool
 from backend.tools.registry import ToolRegistry
-from backend.tools.technical_analysis import (
-    ComputeIndicatorTool,
-    ComputeStatisticTool,
-    DetectSignalTool,
+from backend.tools.backtest import (
+    DetectRegimeTool,
+    EstimateParametersTool,
+    RunMonteCarloTool,
+    SimulateProcessTool,
+)
+from backend.tools.financial_analysis import (
+    TechnicalAnalysisTool,
+    QuantitativeAnalysisTool,
+    SignalAnalysisTool,
+    DiagnosticAnalysisTool,
 )
 from backend.tools.text_analysis import (
     ChunkTextTool,
@@ -57,34 +66,15 @@ from backend.tools.text_analysis import (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan: initialise all backend components on startup.
-
-    Performs the following in order:
-        1. Load ``.env`` so API keys are available in ``os.environ``.
-        2. Create the ``schemas/`` directory and a SchemaPersistence.
-        3. Create a SettingsPersistence; if no settings file exists yet,
-           seed default settings with an OpenRouter provider entry
-           (referencing the ``OPENROUTER_API_KEY`` env var — the actual
-           secret is never written to settings JSON).
-        4. Register all 15 tool instances in a ToolRegistry.
-        5. Create a WorkflowExecutor.
-        6. Wire every API router with its dependencies.
-
-    Args:
-        app: The FastAPI application being started.
-
-    Yields:
-        Control back to the ASGI server for the application's lifetime.
-    """
+    """Application lifespan: initialise all backend components on startup."""
     load_dotenv()
+    install_run_log_handler()
 
-    # -- schema persistence -------------------------------------------------
     schemas_dir = Path("schemas")
     schemas_dir.mkdir(exist_ok=True)
     schema_persistence = SchemaPersistence(schemas_dir)
     validator = SchemaValidator()
 
-    # -- settings persistence -----------------------------------------------
     data_dir = Path("data")
     data_dir.mkdir(exist_ok=True)
     settings_persistence = SettingsPersistence(Path("data/settings.json"))
@@ -96,7 +86,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             llm_providers=[
                 LLMProviderConfig(
                     provider_name="openrouter",
-                    base_url="https://openrouter.ai/api/v1",
+                    base_url="",
                     api_key_env=PROVIDER_DEFAULT_ENV_VAR["openrouter"],
                     available_models=[],
                 ),
@@ -104,13 +94,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         settings_persistence.save_settings(user_settings)
 
-    # -- tool registry (all 15 tools) ---------------------------------------
     tool_registry = ToolRegistry()
     for tool_instance in [
         FetchDataTool(),
-        ComputeIndicatorTool(),
-        ComputeStatisticTool(),
-        DetectSignalTool(),
+        TechnicalAnalysisTool(),
+        QuantitativeAnalysisTool(),
+        SignalAnalysisTool(),
+        DiagnosticAnalysisTool(),
+        DetectRegimeTool(),
+        EstimateParametersTool(),
+        SimulateProcessTool(),
+        RunMonteCarloTool(),
         ChunkTextTool(),
         SemanticSearchTool(),
         ExtractEntitiesTool(),
@@ -125,10 +119,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ]:
         tool_registry.register(tool_instance)
 
-    # -- workflow executor --------------------------------------------------
     executor = WorkflowExecutor(tool_registry, user_settings)
 
-    # -- wire API routers ---------------------------------------------------
     schemas_router.init(schema_persistence, validator)
     runs_router.init(executor, schema_persistence)
     settings_router.init(settings_persistence)
@@ -140,6 +132,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # ---------------------------------------------------------------------------
 # Application
 # ---------------------------------------------------------------------------
+
+server_settings = get_server_settings()
 
 app = FastAPI(
     title="Price Monitor Agent",
@@ -154,7 +148,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=server_settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -164,6 +158,13 @@ app.include_router(schemas_router.router)
 app.include_router(runs_router.router)
 app.include_router(settings_router.router)
 app.include_router(models_router.router)
+
+
+@app.get("/api/health", tags=["health"])
+async def health_check() -> dict:
+    """Return a simple health status for the server."""
+    return {"status": "ok"}
+
 
 frontend_dir = Path(__file__).parent / "static"
 if frontend_dir.exists():

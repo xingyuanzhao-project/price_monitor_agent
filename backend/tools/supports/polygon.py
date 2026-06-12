@@ -1,109 +1,173 @@
 """
-Polygon.io API support.
+Polygon.io API request builders and response parsers.
 
-Fetches US stock, options, forex, and crypto market data from Polygon.io.
-Requires an API key (free tier available).
+What it does:
+    Defines request specs and response parsers for Polygon.io's REST API.
+    Covers aggregate bars (OHLCV), last NBBO quotes, and ticker details.
+    Requires a free API key (passed as parameter).
 
-API base: https://api.polygon.io/
-Docs: https://polygon.io/docs
+Entities in it:
+    - BASE_URL: Polygon.io API root.
+    - _normalize_ticker: Uppercases and strips the ticker symbol.
+    - Request/parse pairs for: ohlcv, quote, ticker_details.
+
+How used by other modules:
+    - data_acquisition.py registers these as Endpoint pairs in DISPATCH.
+    - http.fetch() calls the request function, makes the HTTP call, then
+      passes the raw JSON to the parse function.
+
+API docs: https://polygon.io/docs
 """
 
 from typing import Any
 
-import httpx
 
 BASE_URL = "https://api.polygon.io"
 
 
-async def fetch_ticker_details(ticker: str, api_key: str) -> dict[str, Any]:
-    """Fetch details about a ticker.
+# ---------------------------------------------------------------------------
+# Normalization
+# ---------------------------------------------------------------------------
+
+def _normalize_ticker(raw: str) -> str:
+    """Uppercase and strip the ticker symbol for Polygon.io.
 
     Args:
-        ticker: Stock ticker (e.g. "AAPL").
-        api_key: Polygon.io API key.
+        raw: Ticker string from the LLM.
 
     Returns:
-        Dict with name, market, locale, type, currency, market_cap.
+        Uppercase stripped ticker.
     """
-    url = f"{BASE_URL}/v3/reference/tickers/{ticker}"
-    params = {"apiKey": api_key}
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json().get("results", {})
-        return {
-            "ticker": data.get("ticker"),
-            "name": data.get("name"),
-            "market": data.get("market"),
-            "type": data.get("type"),
-            "currency": data.get("currency_name"),
-            "market_cap": data.get("market_cap"),
-        }
+    return raw.upper().strip()
 
 
-async def fetch_aggregates(
-    ticker: str,
-    api_key: str,
-    multiplier: int = 1,
-    timespan: str = "day",
-    from_date: str = "",
-    to_date: str = "",
-    limit: int = 120,
-) -> list[dict[str, Any]]:
-    """Fetch aggregate bars (OHLCV).
+# ---------------------------------------------------------------------------
+# ohlcv (aggregate bars)
+# ---------------------------------------------------------------------------
+
+def ohlcv_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for aggregate bars (OHLCV).
 
     Args:
-        ticker: Stock/crypto/forex ticker.
-        api_key: Polygon.io API key.
-        multiplier: Size of the timespan multiplier.
-        timespan: "minute", "hour", "day", "week", "month".
-        from_date: Start date (YYYY-MM-DD).
-        to_date: End date (YYYY-MM-DD).
-        limit: Max bars (max 50000).
+        **kwargs: Generic LLM params.  Uses ``symbol`` (as ticker), ``api_key``,
+                  ``multiplier``, ``timespan``, ``from_date``, ``to_date``,
+                  ``limit``.
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    ticker = _normalize_ticker(kwargs.get("symbol", ""))
+    api_key = kwargs.get("api_key", "")
+    multiplier = int(kwargs.get("multiplier", 1))
+    timespan = kwargs.get("timespan", "day")
+    from_date = kwargs.get("from_date", "")
+    to_date = kwargs.get("to_date", "")
+    limit = min(int(kwargs.get("limit", 120)), 50000)
+    return {
+        "path": f"/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}",
+        "params": {"apiKey": api_key, "limit": limit, "sort": "desc"},
+    }
+
+
+def ohlcv_parse(data: dict) -> list[dict[str, Any]]:
+    """Parse Polygon.io aggregate bars JSON response.
+
+    Args:
+        data: Raw JSON dict from the API.
 
     Returns:
         List of bar dicts with ts, o, h, l, c, v, vw.
     """
-    url = f"{BASE_URL}/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
-    params = {"apiKey": api_key, "limit": min(limit, 50000), "sort": "desc"}
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        bars = []
-        for r in data.get("results", []):
-            bars.append({
-                "ts": r["t"],
-                "o": r["o"],
-                "h": r["h"],
-                "l": r["l"],
-                "c": r["c"],
-                "v": r["v"],
-                "vw": r.get("vw"),
-            })
-        return bars
+    return [
+        {
+            "ts": r["t"],
+            "o": r["o"],
+            "h": r["h"],
+            "l": r["l"],
+            "c": r["c"],
+            "v": r["v"],
+            "vw": r.get("vw"),
+        }
+        for r in data.get("results", [])
+    ]
 
 
-async def fetch_last_quote(ticker: str, api_key: str) -> dict[str, Any]:
-    """Fetch last NBBO quote for a ticker.
+# ---------------------------------------------------------------------------
+# quote (last NBBO)
+# ---------------------------------------------------------------------------
+
+def quote_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for the last NBBO quote of a ticker.
 
     Args:
-        ticker: Stock ticker.
-        api_key: Polygon.io API key.
+        **kwargs: Generic LLM params.  Uses ``symbol`` (as ticker), ``api_key``.
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    ticker = _normalize_ticker(kwargs.get("symbol", ""))
+    api_key = kwargs.get("api_key", "")
+    return {
+        "path": f"/v2/last/nbbo/{ticker}",
+        "params": {"apiKey": api_key},
+    }
+
+
+def quote_parse(data: dict) -> dict[str, Any]:
+    """Parse Polygon.io last NBBO quote JSON response.
+
+    Args:
+        data: Raw JSON dict from the API.
 
     Returns:
         Dict with bid, ask, bid_size, ask_size, timestamp.
     """
-    url = f"{BASE_URL}/v2/last/nbbo/{ticker}"
-    params = {"apiKey": api_key}
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json().get("results", {})
-        return {
-            "bid": data.get("p"),
-            "ask": data.get("P"),
-            "bid_size": data.get("s"),
-            "ask_size": data.get("S"),
-            "timestamp": data.get("t"),
-        }
+    results = data.get("results", {})
+    return {
+        "bid": results.get("p"),
+        "ask": results.get("P"),
+        "bid_size": results.get("s"),
+        "ask_size": results.get("S"),
+        "timestamp": results.get("t"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# ticker_details
+# ---------------------------------------------------------------------------
+
+def ticker_details_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for ticker detail information.
+
+    Args:
+        **kwargs: Generic LLM params.  Uses ``symbol`` (as ticker), ``api_key``.
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    ticker = _normalize_ticker(kwargs.get("symbol", ""))
+    api_key = kwargs.get("api_key", "")
+    return {
+        "path": f"/v3/reference/tickers/{ticker}",
+        "params": {"apiKey": api_key},
+    }
+
+
+def ticker_details_parse(data: dict) -> dict[str, Any]:
+    """Parse Polygon.io ticker details JSON response.
+
+    Args:
+        data: Raw JSON dict from the API.
+
+    Returns:
+        Dict with ticker, name, market, type, currency, market_cap.
+    """
+    results = data.get("results", {})
+    return {
+        "ticker": results.get("ticker"),
+        "name": results.get("name"),
+        "market": results.get("market"),
+        "type": results.get("type"),
+        "currency": results.get("currency_name"),
+        "market_cap": results.get("market_cap"),
+    }

@@ -1,90 +1,169 @@
 """
-GitHub public API connector for trending/popular repositories.
+GitHub API request builders and response parsers.
 
-Uses the GitHub Search API to find recently popular repositories.
-No authentication required (rate-limited to 10 requests/minute unauthenticated).
+What it does:
+    Defines request specs and response parsers for the GitHub REST API.
+    Covers trending repositories (by recent stars) and keyword search.
+    No authentication required (rate-limited to 10 requests/minute
+    unauthenticated).
 
-API base: https://api.github.com
-Docs: https://docs.github.com/en/rest/search/search
+Entities in it:
+    - BASE_URL: GitHub API root.
+    - HEADERS: Standard Accept and User-Agent headers for GitHub API.
+    - _normalize_language: Lowercases and converts spaces to hyphens.
+    - Request/parse pairs for: trending, search.
+
+How used by other modules:
+    - data_acquisition.py registers these as Endpoint pairs in DISPATCH
+      under the ``"github"`` source_id.
+    - http.fetch() calls the request function, makes the HTTP call, then
+      passes the raw JSON to the parse function.
+
+API docs: https://docs.github.com/en/rest/search/search
 """
 
-from typing import Any
 from datetime import date, timedelta
+from typing import Any
 
-import httpx
 
 BASE_URL = "https://api.github.com"
-HEADERS = {"Accept": "application/vnd.github+json", "User-Agent": "price_monitor_agent/1.0"}
+
+HEADERS = {
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "price_monitor_agent/1.0",
+}
 
 
-async def fetch_trending(
-    language: str = "",
-    since_days: int = 7,
-    limit: int = 20,
-) -> list[dict[str, Any]]:
-    """Fetch trending repositories by stars gained recently.
+# ---------------------------------------------------------------------------
+# Normalization
+# ---------------------------------------------------------------------------
+
+def _normalize_language(raw: str) -> str:
+    """Normalize a programming language name for GitHub search qualifiers.
+
+    Lowercases the input and replaces spaces with hyphens so that
+    multi-word language names work correctly (e.g. ``"C Sharp"`` →
+    ``"c-sharp"``).  Special characters like ``+`` are preserved
+    (e.g. ``"C++"`` → ``"c++"``).
 
     Args:
-        language: Filter by programming language (e.g. "python", "rust"). Empty = all.
-        since_days: Look back window in days (default 7).
-        limit: Max repos to return (max 100).
+        raw: Language name from the LLM.
 
     Returns:
-        List of repo dicts with name, description, stars, language, url.
+        Normalised language string suitable for a GitHub ``language:``
+        qualifier.
     """
+    return raw.strip().lower().replace(" ", "-")
+
+
+# ---------------------------------------------------------------------------
+# trending
+# ---------------------------------------------------------------------------
+
+def trending_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for trending repositories by recent stars.
+
+    Uses the GitHub search API with a ``created:>`` date filter, sorted
+    by star count descending, to approximate a "trending" list.
+
+    Args:
+        **kwargs: Generic LLM params.  Uses ``language``, ``since_days``,
+                  ``limit``.
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    since_days = int(kwargs.get("since_days", 7))
     cutoff = (date.today() - timedelta(days=since_days)).isoformat()
-    q = f"created:>{cutoff}"
+    query = f"created:>{cutoff}"
+
+    language = kwargs.get("language", "")
     if language:
-        q += f" language:{language}"
-    url = f"{BASE_URL}/search/repositories"
-    params = {"q": q, "sort": "stars", "order": "desc", "per_page": min(limit, 100)}
-    async with httpx.AsyncClient(headers=HEADERS, timeout=15.0) as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        return [
-            {
-                "name": r["full_name"],
-                "description": r.get("description", ""),
-                "stars": r.get("stargazers_count", 0),
-                "language": r.get("language", ""),
-                "url": r.get("html_url", ""),
-                "created_at": r.get("created_at", ""),
-                "topics": r.get("topics", []),
-            }
-            for r in data.get("items", [])
-        ]
+        query += f" language:{_normalize_language(language)}"
+
+    limit = min(int(kwargs.get("limit", 20)), 100)
+    return {
+        "path": "/search/repositories",
+        "params": {
+            "q": query,
+            "sort": "stars",
+            "order": "desc",
+            "per_page": limit,
+        },
+        "headers": HEADERS,
+    }
 
 
-async def search_repos(
-    query: str,
-    sort: str = "stars",
-    limit: int = 20,
-) -> list[dict[str, Any]]:
-    """Search GitHub repositories by keyword.
+def trending_parse(data: dict) -> list[dict[str, Any]]:
+    """Parse GitHub search/repositories JSON for trending repos.
 
     Args:
-        query: Search term (e.g. "trading bot", "crypto", "quantitative finance").
-        sort: Sort by "stars", "forks", "updated", or "help-wanted-issues".
-        limit: Max repos.
+        data: Raw JSON dict from the API.
 
     Returns:
-        List of repo dicts.
+        List of repo dicts with name, description, stars, language, url,
+        created_at, topics.
     """
-    url = f"{BASE_URL}/search/repositories"
-    params = {"q": query, "sort": sort, "order": "desc", "per_page": min(limit, 100)}
-    async with httpx.AsyncClient(headers=HEADERS, timeout=15.0) as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        return [
-            {
-                "name": r["full_name"],
-                "description": r.get("description", ""),
-                "stars": r.get("stargazers_count", 0),
-                "language": r.get("language", ""),
-                "url": r.get("html_url", ""),
-                "topics": r.get("topics", []),
-            }
-            for r in data.get("items", [])
-        ]
+    return [
+        {
+            "name": r["full_name"],
+            "description": r.get("description", ""),
+            "stars": r.get("stargazers_count", 0),
+            "language": r.get("language", ""),
+            "url": r.get("html_url", ""),
+            "created_at": r.get("created_at", ""),
+            "topics": r.get("topics", []),
+        }
+        for r in data.get("items", [])
+    ]
+
+
+# ---------------------------------------------------------------------------
+# search
+# ---------------------------------------------------------------------------
+
+def search_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for searching GitHub repositories by keyword.
+
+    Args:
+        **kwargs: Generic LLM params.  Uses ``query``, ``sort``, ``limit``.
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    query = kwargs.get("query", "")
+    sort = kwargs.get("sort", "stars")
+    limit = min(int(kwargs.get("limit", 20)), 100)
+    return {
+        "path": "/search/repositories",
+        "params": {
+            "q": query,
+            "sort": sort,
+            "order": "desc",
+            "per_page": limit,
+        },
+        "headers": HEADERS,
+    }
+
+
+def search_parse(data: dict) -> list[dict[str, Any]]:
+    """Parse GitHub search/repositories JSON response.
+
+    Args:
+        data: Raw JSON dict from the API.
+
+    Returns:
+        List of repo dicts with name, description, stars, language, url,
+        topics.
+    """
+    return [
+        {
+            "name": r["full_name"],
+            "description": r.get("description", ""),
+            "stars": r.get("stargazers_count", 0),
+            "language": r.get("language", ""),
+            "url": r.get("html_url", ""),
+            "topics": r.get("topics", []),
+        }
+        for r in data.get("items", [])
+    ]

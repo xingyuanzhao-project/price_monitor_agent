@@ -19,9 +19,10 @@ export enum EdgeType {
 
 export enum LoggingLevel {
   NONE = "none",
-  ERRORS = "errors",
+  ALL = "all",
   INFO = "info",
   CRITICAL_INFO = "critical_info",
+  ERRORS = "errors",
 }
 
 export enum GroupStructure {
@@ -35,7 +36,9 @@ export interface WorkflowConfig {
   total_timeout: number;
   logging_level: LoggingLevel;
   trace_enabled: boolean;
-  dead_loop_detection: boolean;
+  max_loop_rounds: number;
+  max_iterations: number;
+  iteration_sleep: number;
 }
 
 export type OutputFieldDataType = "string" | "binary" | "category" | "numeric" | "integer";
@@ -69,14 +72,18 @@ export interface NodeConfig {
   retries: number;
   retry_waiting_time: number;
   termination_conditions: string[];
-  max_iterations: number;
-  iteration_sleep: number;
   token_budget: number;
   scope_window: number;
   tools: string[];
+  tool_strict: boolean;
+  tool_choice: "auto" | "required" | "none";
+  parallel_tool_calls: boolean;
   call_budget: number;
   rate_limit_per_minute: number;
   few_shot_examples: { role: string; content: string }[];
+  read_upstream_state: boolean;
+  expose_downstream_state: boolean;
+  read_orchestration_state: boolean;
 }
 
 export interface AgentGroupConfig {
@@ -84,8 +91,9 @@ export interface AgentGroupConfig {
   min_agents: number;
   max_agents: number;
   group_structure: GroupStructure;
-  shared_state: Record<string, unknown>;
+  shared_context: Record<string, unknown>;
   tool_authorization: string[];
+  sub_agent_read_group_state: boolean;
 }
 
 export interface NodePosition {
@@ -212,7 +220,12 @@ export interface RunEvent {
   event_id: string;
   run_id: string;
   node_id: string;
-  event_type: "node_start" | "node_output" | "node_error" | "node_complete" | "tool_call" | "tool_result" | "run_complete" | "run_error";
+  event_type: "run_start" | "node_start" | "node_input" | "node_output" | "node_error" | "node_complete" | "tool_call" | "tool_result" | "run_complete" | "run_error";
   timestamp: string;
   data: Record<string, unknown>;
+}
+
+export interface ToolCategory {
+  category: string;
+  tools: string[];
 }

@@ -1,83 +1,175 @@
 """
-BIS (Bank for International Settlements) Statistics connector.
+BIS (Bank for International Settlements) Statistics request builders and
+response parsers.
 
-Fetches central bank policy rates, effective exchange rates, and credit data
-from the BIS SDMX RESTful API. No authentication required.
-Uses CSV format (the API does not support JSON).
+What it does:
+    Defines request specs and response parsers for the BIS SDMX RESTful API.
+    Covers central bank policy rates and effective exchange rates (REER/NEER).
+    Returns CSV format (the API does not support JSON).
+    No authentication required.
 
-API base: https://stats.bis.org/api/v1
-Docs: https://stats.bis.org/api-doc/v1/
+Entities in it:
+    - BASE_URL: BIS Statistics API v1 root.
+    - _normalize_country: Uppercases 2-letter ISO country codes.
+    - _normalize_frequency: Uppercases single-letter frequency (M/D).
+    - _parse_csv: Shared CSV text parser for BIS responses.
+    - Request/parse pairs for: policy_rates, exchange_rates.
+
+How used by other modules:
+    - data_acquisition.py registers these as Endpoint pairs in DISPATCH.
+    - http.fetch() calls the request function, makes the HTTP call, then
+      passes the raw CSV text to the parse function.
+
+API docs: https://stats.bis.org/api-doc/v1/
 """
 
 import csv
 import io
 from typing import Any
 
-import httpx
 
 BASE_URL = "https://stats.bis.org/api/v1"
 
 
-async def fetch_policy_rates(
-    country: str = "US",
-    frequency: str = "M",
-    last_n: int = 24,
-) -> dict[str, Any]:
-    """Fetch central bank policy rates.
+# ---------------------------------------------------------------------------
+# Normalization
+# ---------------------------------------------------------------------------
+
+def _normalize_country(raw: str) -> str:
+    """Uppercase and strip a 2-letter ISO country code.
 
     Args:
-        country: ISO 2-letter country code (US, GB, JP, CH, DE, etc.).
-        frequency: M (monthly) or D (daily).
-        last_n: Number of most recent observations.
+        raw: Country code from the LLM (e.g. "us", " GB ").
 
     Returns:
-        Dict with flow, key, and list of observations [{period, value}].
+        Uppercased 2-letter country code.
     """
-    flow = "WS_CBPOL"
-    key = f"{frequency}.{country}"
-    return await _fetch_bis_data(flow, key, last_n)
+    return raw.strip().upper()
 
 
-async def fetch_exchange_rates(
-    country: str = "US",
-    rate_type: str = "N",
-    basis: str = "B",
-    last_n: int = 24,
-) -> dict[str, Any]:
-    """Fetch BIS effective exchange rates (REER/NEER).
+def _normalize_frequency(raw: str) -> str:
+    """Uppercase a single-letter frequency code.
+
+    Accepts M (monthly) or D (daily).
 
     Args:
-        country: ISO 2-letter country code.
-        rate_type: N (nominal) or R (real).
-        basis: B (broad) or N (narrow).
-        last_n: Number of most recent observations.
+        raw: Frequency from the LLM (e.g. "m", "D").
 
     Returns:
-        Dict with flow, key, and list of observations [{period, value}].
+        Single uppercase letter.
     """
-    flow = "WS_EER"
-    key = f"M.{rate_type}.{basis}.{country}"
-    return await _fetch_bis_data(flow, key, last_n)
+    return raw.strip().upper()[:1] or "M"
 
 
-async def _fetch_bis_data(flow: str, key: str, last_n: int) -> dict[str, Any]:
-    url = f"{BASE_URL}/data/{flow}/{key}/all"
-    params = {"lastNObservations": last_n, "detail": "dataonly", "format": "csv"}
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        response = await client.get(url, params=params)
-        response.raise_for_status()
-        return _parse_csv(response.text, flow, key)
+# ---------------------------------------------------------------------------
+# Shared CSV parser
+# ---------------------------------------------------------------------------
 
+def _parse_csv(text: str, flow: str) -> dict[str, Any]:
+    """Parse BIS SDMX CSV response text into structured observations.
 
-def _parse_csv(text: str, flow: str, key: str) -> dict[str, Any]:
+    Args:
+        text: Raw CSV text from the API.
+        flow: BIS dataflow identifier (e.g. "WS_CBPOL").
+
+    Returns:
+        Dict with flow and list of observations [{period, value}].
+    """
     reader = csv.DictReader(io.StringIO(text))
     observations = []
     for row in reader:
         period = row.get("TIME_PERIOD", "")
         value_string = row.get("OBS_VALUE", "")
         try:
-            value = float(value_string)
+            value: Any = float(value_string)
         except (ValueError, TypeError):
             value = value_string
         observations.append({"period": period, "value": value})
-    return {"flow": flow, "key": key, "observations": observations}
+    return {"flow": flow, "observations": observations}
+
+
+# ---------------------------------------------------------------------------
+# policy_rates
+# ---------------------------------------------------------------------------
+
+def policy_rates_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for central bank policy rates.
+
+    Args:
+        **kwargs: Generic LLM params.  Uses ``country`` (2-letter ISO),
+                  ``frequency`` (M or D), ``limit`` (lastNObservations).
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    country = _normalize_country(kwargs.get("country", "US"))
+    frequency = _normalize_frequency(kwargs.get("frequency", "M"))
+    limit = int(kwargs.get("limit", 24))
+    key = f"{frequency}.{country}"
+    return {
+        "path": f"/data/WS_CBPOL/{key}/all",
+        "params": {
+            "lastNObservations": limit,
+            "detail": "dataonly",
+            "format": "csv",
+        },
+        "response_format": "text",
+        "timeout": 20.0,
+    }
+
+
+def policy_rates_parse(data: str) -> dict[str, Any]:
+    """Parse BIS policy rates CSV response.
+
+    Args:
+        data: Raw CSV text from the API.
+
+    Returns:
+        Dict with flow and list of observations [{period, value}].
+    """
+    return _parse_csv(data, "WS_CBPOL")
+
+
+# ---------------------------------------------------------------------------
+# exchange_rates
+# ---------------------------------------------------------------------------
+
+def exchange_rates_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for BIS effective exchange rates (REER/NEER).
+
+    Args:
+        **kwargs: Generic LLM params.  Uses ``country`` (2-letter ISO),
+                  ``indicator`` (N for nominal, R for real),
+                  ``basis`` (B for broad, N for narrow),
+                  ``limit`` (lastNObservations).
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    country = _normalize_country(kwargs.get("country", "US"))
+    rate_type = kwargs.get("indicator", "N").strip().upper()[:1]
+    basis = kwargs.get("basis", "B").strip().upper()[:1]
+    limit = int(kwargs.get("limit", 24))
+    key = f"M.{rate_type}.{basis}.{country}"
+    return {
+        "path": f"/data/WS_EER/{key}/all",
+        "params": {
+            "lastNObservations": limit,
+            "detail": "dataonly",
+            "format": "csv",
+        },
+        "response_format": "text",
+        "timeout": 20.0,
+    }
+
+
+def exchange_rates_parse(data: str) -> dict[str, Any]:
+    """Parse BIS effective exchange rate CSV response.
+
+    Args:
+        data: Raw CSV text from the API.
+
+    Returns:
+        Dict with flow and list of observations [{period, value}].
+    """
+    return _parse_csv(data, "WS_EER")

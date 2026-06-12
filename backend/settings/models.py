@@ -139,6 +139,12 @@ class AdditionalToolApi(BaseModel):
     base_url: str = Field(default="", description="Override base URL (empty = use default)")
 
 
+def _default_public_source_ids() -> list[str]:
+    """Return all public source IDs so every source is enabled by default."""
+    from backend.tools.supports.registry import PUBLIC_DATA_SOURCES
+    return [src.source_id for src in PUBLIC_DATA_SOURCES]
+
+
 class UserSettings(BaseModel):
     """Top-level aggregation of all user configuration."""
 
@@ -152,7 +158,8 @@ class UserSettings(BaseModel):
         default_factory=dict, description="Global default settings"
     )
     enabled_public_sources: list[str] = Field(
-        default_factory=list, description="Source IDs of enabled public data sources"
+        default_factory=lambda: _default_public_source_ids(),
+        description="Source IDs of enabled public data sources",
     )
     additional_tool_apis: list[AdditionalToolApi] = Field(
         default_factory=list, description="User-configured additional tool API entries"

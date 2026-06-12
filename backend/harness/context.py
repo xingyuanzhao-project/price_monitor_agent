@@ -83,16 +83,12 @@ class ContextHarness:
         instruction: User-created instruction prompts sent as user-role messages.
         token_budget: Maximum number of tokens for the assembled message list.
         scope_window: Maximum number of few-shot examples to retain.
-        state: Mutable key/value store carried across invocations.
         few_shot_examples: Example user/assistant pairs for in-context learning.
 
     Methods:
         assemble_messages: Build the full LLM message list.
         validate_input: Enforce input guardrail rules (raises on violation).
         validate_output: Enforce output guardrail rules (raises on violation).
-        update_state: Set a single key in the internal state dict.
-        merge_upstream_state: Merge another dict into the internal state.
-        get_state: Return a shallow copy of the current state.
     """
 
     def __init__(
@@ -102,7 +98,6 @@ class ContextHarness:
         token_budget: int,
         scope_window: int,
         guardrail_rules: list[str],
-        state: dict[str, Any] | None = None,
         few_shot_examples: list[dict[str, str]] | None = None,
     ) -> None:
         """Initialise the context harness.
@@ -113,7 +108,6 @@ class ContextHarness:
             token_budget: Token ceiling (1 token ≈ 4 chars).
             scope_window: How many recent few-shot examples to keep.
             guardrail_rules: Raw strings in ``"scope:rule_type:value"`` format.
-            state: Optional initial state dict.
             few_shot_examples: Optional list of ``{"user": …, "assistant": …}``
                 dicts.
 
@@ -124,7 +118,6 @@ class ContextHarness:
         self.instruction = list(instruction)
         self.token_budget = token_budget
         self.scope_window = scope_window
-        self.state: dict[str, Any] = dict(state) if state else {}
         self.few_shot_examples = list(few_shot_examples) if few_shot_examples else []
         self._parsed_rules = _parse_guardrail_rules(guardrail_rules)
 
@@ -244,30 +237,6 @@ class ContextHarness:
         if violations:
             raise GuardrailViolationError(violations)
 
-    def update_state(self, key: str, value: Any) -> None:
-        """Set a single key in the internal state dict.
-
-        Args:
-            key: State key.
-            value: Arbitrary value to store.
-        """
-        self.state[key] = value
-
-    def merge_upstream_state(self, upstream_state: dict[str, Any]) -> None:
-        """Merge upstream state into the internal state dict.
-
-        Args:
-            upstream_state: Key/value pairs to merge (overwrites on collision).
-        """
-        self.state.update(upstream_state)
-
-    def get_state(self) -> dict[str, Any]:
-        """Return a shallow copy of the current state.
-
-        Returns:
-            A dict snapshot of the harness state.
-        """
-        return dict(self.state)
 
 
 # ---------------------------------------------------------------------------

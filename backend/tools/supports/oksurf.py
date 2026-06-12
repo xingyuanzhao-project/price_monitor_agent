@@ -1,60 +1,118 @@
 """
-OKSURF News API connector.
+OKSURF News API request builders and response parsers.
 
-Fetches Google News headlines by section via the free OKSURF REST API.
-No authentication required. No rate limits.
+What it does:
+    Defines request specs and response parsers for the OKSURF Google News API.
+    Covers all-headlines feed and section-specific headline retrieval.
+    No authentication required. No rate limits.
 
-API base: https://ok.surf/api/v1
-Docs: https://ok.surf/
+Entities in it:
+    - BASE_URL: OKSURF API v1 root.
+    - _normalize_section: Converts section name to Title Case.
+    - Request/parse pairs for: headlines, section.
+
+How used by other modules:
+    - data_acquisition.py registers these as Endpoint pairs in DISPATCH.
+    - http.fetch() calls the request function, makes the HTTP call, then
+      passes the raw JSON to the parse function.
+
+API docs: https://ok.surf/
 """
 
 from typing import Any
 
-import httpx
 
 BASE_URL = "https://ok.surf/api/v1"
 
 
-async def fetch_all_headlines() -> list[dict[str, Any]]:
-    """Fetch all Google News headlines across all sections.
+# ---------------------------------------------------------------------------
+# Normalization
+# ---------------------------------------------------------------------------
+
+def _normalize_section(raw: str) -> str:
+    """Convert section name to Title Case as expected by OKSURF.
+
+    Valid sections: US, World, Business, Technology, Entertainment,
+    Sports, Science, Health.
+
+    Args:
+        raw: Section string from the LLM.
+
+    Returns:
+        Title-cased section name.
+    """
+    return raw.strip().title()
+
+
+# ---------------------------------------------------------------------------
+# headlines (all sections)
+# ---------------------------------------------------------------------------
+
+def headlines_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for all Google News headlines across all sections.
+
+    Args:
+        **kwargs: Generic LLM params.  No params needed for this endpoint.
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    return {"path": "/news-feed", "params": {}, "timeout": 15.0}
+
+
+def headlines_parse(data: Any) -> list[dict[str, Any]]:
+    """Parse OKSURF all-headlines JSON response.
+
+    Args:
+        data: Raw JSON from the API (dict keyed by section, or list).
 
     Returns:
         List of article dicts with title, link, source, section.
     """
-    url = f"{BASE_URL}/news-feed"
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, dict):
-            articles = []
-            for section, items in data.items():
-                if isinstance(items, list):
-                    for item in items:
-                        item["section"] = section
-                        articles.append(item)
-            return articles
-        return data
+    if isinstance(data, dict):
+        articles = []
+        for section, items in data.items():
+            if isinstance(items, list):
+                for item in items:
+                    item["section"] = section
+                    articles.append(item)
+        return articles
+    return data
 
 
-async def fetch_section(
-    section: str = "Business",
-) -> list[dict[str, Any]]:
-    """Fetch headlines for a specific Google News section.
+# ---------------------------------------------------------------------------
+# section (specific section via POST)
+# ---------------------------------------------------------------------------
+
+def section_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for headlines from a specific Google News section.
 
     Args:
-        section: Section name -- US, World, Business, Technology,
-                 Entertainment, Sports, Science, Health.
+        **kwargs: Generic LLM params.  Uses ``section``.
+
+    Returns:
+        Request spec dict for http.fetch() with POST method.
+    """
+    section = _normalize_section(kwargs.get("section", "Business"))
+    return {
+        "path": "/news-section",
+        "params": {},
+        "method": "POST",
+        "body": {"sections": [section]},
+        "timeout": 15.0,
+    }
+
+
+def section_parse(data: Any) -> list[dict[str, Any]]:
+    """Parse OKSURF section headlines JSON response.
+
+    Args:
+        data: Raw JSON from the API (dict keyed by section name, or list).
 
     Returns:
         List of article dicts with title, link, source.
     """
-    url = f"{BASE_URL}/news-section"
-    payload = {"sections": [section]}
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.post(url, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, dict):
-            return data.get(section, [])
-        return data
+    if isinstance(data, dict):
+        section_name = next(iter(data), "")
+        return data.get(section_name, [])
+    return data

@@ -23,6 +23,7 @@ import type {
   ProviderStatusResponse,
   OutputFieldRow,
   OutputFieldDataType,
+  ToolCategory,
 } from "../../types/schema";
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -119,7 +120,7 @@ function rowsToResponseFormat(rows: OutputFieldRow[]): Record<string, unknown> |
 export default function NodeConfigPanel() {
   const selectedNodeId = useWorkflowStore((s) => s.selectedNodeId);
   const nodes = useWorkflowStore((s) => s.nodes);
-  const availableTools = useWorkflowStore((s) => s.availableTools);
+  const toolHierarchy = useWorkflowStore((s) => s.toolHierarchy);
   const updateNode = useWorkflowStore((s) => s.updateNode);
   const updateNodeConfig = useWorkflowStore((s) => s.updateNodeConfig);
   const updateGroupConfig = useWorkflowStore((s) => s.updateGroupConfig);
@@ -130,6 +131,45 @@ export default function NodeConfigPanel() {
   const [newCondition, setNewCondition] = useState("");
 
   const node = nodes.find((n) => n.id === selectedNodeId);
+
+  const nodeConfig = node?.data.config as NodeConfig | undefined;
+
+  const toolCallingMode = useMemo(() => {
+    if (!nodeConfig) return "auto";
+    const tc = nodeConfig.tool_choice ?? "auto";
+    const ptc = nodeConfig.parallel_tool_calls ?? true;
+    if (tc === "none") return "none";
+    if (tc === "auto") return "auto";
+    return ptc ? "required_multi" : "required_single";
+  }, [nodeConfig?.tool_choice, nodeConfig?.parallel_tool_calls]);
+
+  const handleToolCallingMode = useCallback(
+    (value: string) => {
+      if (!node) return;
+      const patch: Partial<NodeConfig> = {};
+      switch (value) {
+        case "none":
+          patch.tool_choice = "none";
+          patch.parallel_tool_calls = false;
+          break;
+        case "auto":
+          patch.tool_choice = "auto";
+          patch.parallel_tool_calls = true;
+          break;
+        case "required_single":
+          patch.tool_choice = "required";
+          patch.parallel_tool_calls = false;
+          break;
+        case "required_multi":
+          patch.tool_choice = "required";
+          patch.parallel_tool_calls = true;
+          break;
+      }
+      updateNodeConfig(node.id, patch);
+    },
+    [node, updateNodeConfig],
+  );
+
   if (!node) return null;
 
   const config = node.data.config as NodeConfig;
@@ -143,7 +183,7 @@ export default function NodeConfigPanel() {
         nodeId={node.id}
         label={label}
         config={config}
-        availableTools={availableTools}
+        toolHierarchy={toolHierarchy}
         updateNode={updateNode}
         updateNodeConfig={updateNodeConfig}
         removeNode={removeNode}
@@ -156,265 +196,267 @@ export default function NodeConfigPanel() {
     <div className="panel">
       <div className="panel-header">Node Configuration</div>
       <div className="panel-body">
-        <div className="form-group">
-          <label className="form-label">Label</label>
-          <input
-            className="form-input"
-            value={label}
-            onChange={(e) => updateNode(node.id, { label: e.target.value })}
-          />
-        </div>
 
-        <div className="form-group">
-          <label className="form-label">Node Type</label>
-          <div className="text-sm text-muted" style={{ textTransform: "uppercase" }}>
-            {nodeType}
+        {/* ── General ──────────────────────────────────────────── */}
+        <div className="config-section">
+          <div className="config-section-title">General</div>
+          <div className="config-section-body">
+            <div className="form-group">
+              <label className="form-label">Label</label>
+              <input
+                className="form-input"
+                value={label}
+                onChange={(e) => updateNode(node.id, { label: e.target.value })}
+              />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Node Type</label>
+              <div className="text-sm text-muted" style={{ textTransform: "uppercase" }}>
+                {nodeType}
+              </div>
+            </div>
+
+            <ProviderModelSelector
+              provider={config.provider}
+              modelId={config.model_id}
+              onProviderChange={(provider) =>
+                updateNodeConfig(node.id, { provider, model_id: "" })
+              }
+              onModelChange={(modelId) => updateNodeConfig(node.id, { model_id: modelId })}
+            />
+
+            <div className="form-group">
+              <label className="form-label">
+                Temperature: {config.temperature.toFixed(2)}
+              </label>
+              <input
+                type="range"
+                min="0"
+                max="2"
+                step="0.01"
+                value={config.temperature}
+                onChange={(e) =>
+                  updateNodeConfig(node.id, { temperature: parseFloat(e.target.value) })
+                }
+              />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Max Tokens (blank = model max)</label>
+              <input
+                type="number"
+                className="form-input"
+                value={config.max_tokens ?? ""}
+                placeholder="Default (model max)"
+                onChange={(e) =>
+                  updateNodeConfig(node.id, {
+                    max_tokens: e.target.value ? parseInt(e.target.value) : null,
+                  })
+                }
+              />
+            </div>
           </div>
         </div>
 
-        <hr className="divider" />
+        {/* ── Prompts ──────────────────────────────────────────── */}
+        <div className="config-section">
+          <div className="config-section-title">Prompts</div>
+          <div className="config-section-body">
+            <TagListEditor
+              label="Instructions"
+              items={config.instruction}
+              newValue={newRule}
+              onNewValueChange={setNewRule}
+              onAdd={() => {
+                if (!newRule.trim()) return;
+                updateNodeConfig(node.id, {
+                  instruction: [...config.instruction, newRule.trim()],
+                });
+                setNewRule("");
+              }}
+              onRemove={(index) =>
+                updateNodeConfig(node.id, {
+                  instruction: config.instruction.filter((_, i) => i !== index),
+                })
+              }
+            />
 
-        <ProviderModelSelector
-          provider={config.provider}
-          modelId={config.model_id}
-          onProviderChange={(provider) =>
-            updateNodeConfig(node.id, { provider, model_id: "" })
-          }
-          onModelChange={(modelId) => updateNodeConfig(node.id, { model_id: modelId })}
-        />
+            <OutputSchemaEditor
+              responseFormat={config.response_format}
+              onChange={(rf) => updateNodeConfig(node.id, { response_format: rf })}
+            />
 
-        <div className="form-group">
-          <label className="form-label">
-            Temperature: {config.temperature.toFixed(2)}
-          </label>
-          <input
-            type="range"
-            min="0"
-            max="2"
-            step="0.01"
-            value={config.temperature}
-            onChange={(e) =>
-              updateNodeConfig(node.id, { temperature: parseFloat(e.target.value) })
-            }
-          />
+            <div className="form-group">
+              <label className="form-label">State Access</label>
+              <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                <label className="form-label toggle-label">
+                  <input
+                    type="checkbox"
+                    checked={config.read_orchestration_state ?? false}
+                    onChange={(e) =>
+                      updateNodeConfig(node.id, { read_orchestration_state: e.target.checked })
+                    }
+                  />
+                  Access Global State
+                </label>
+                {nodeType === NodeType.AGENT_GROUP && (
+                  <label className="form-label toggle-label">
+                    <input
+                      type="checkbox"
+                      checked={groupConfig?.sub_agent_read_group_state ?? true}
+                      onChange={(e) =>
+                        updateGroupConfig(node.id, { sub_agent_read_group_state: e.target.checked })
+                      }
+                    />
+                    Sub-agents Access Group State
+                  </label>
+                )}
+                <label className="form-label toggle-label">
+                  <input
+                    type="checkbox"
+                    checked={config.read_upstream_state ?? true}
+                    onChange={(e) =>
+                      updateNodeConfig(node.id, { read_upstream_state: e.target.checked })
+                    }
+                  />
+                  Receive Upstream State
+                </label>
+                <label className="form-label toggle-label">
+                  <input
+                    type="checkbox"
+                    checked={config.expose_downstream_state ?? true}
+                    onChange={(e) =>
+                      updateNodeConfig(node.id, { expose_downstream_state: e.target.checked })
+                    }
+                  />
+                  Share State Downstream
+                </label>
+              </div>
+            </div>
+
+            <TagListEditor
+              label="Termination Conditions"
+              items={config.termination_conditions}
+              newValue={newCondition}
+              onNewValueChange={setNewCondition}
+              onAdd={() => {
+                if (!newCondition.trim()) return;
+                updateNodeConfig(node.id, {
+                  termination_conditions: [
+                    ...config.termination_conditions,
+                    newCondition.trim(),
+                  ],
+                });
+                setNewCondition("");
+              }}
+              onRemove={(index) =>
+                updateNodeConfig(node.id, {
+                  termination_conditions: config.termination_conditions.filter(
+                    (_, i) => i !== index
+                  ),
+                })
+              }
+            />
+          </div>
         </div>
 
-        <div className="form-group">
-          <label className="form-label">Max Tokens (blank = model max)</label>
-          <input
-            type="number"
-            className="form-input"
-            value={config.max_tokens ?? ""}
-            placeholder="Default (model max)"
-            onChange={(e) =>
-              updateNodeConfig(node.id, {
-                max_tokens: e.target.value ? parseInt(e.target.value) : null,
-              })
-            }
-          />
+        {/* ── Execution ────────────────────────────────────────── */}
+        <div className="config-section">
+          <div className="config-section-title">Execution</div>
+          <div className="config-section-body">
+            <div className="form-group">
+              <label className="form-label">Retries</label>
+              <input
+                type="number"
+                className="form-input"
+                min="0"
+                value={config.retries}
+                onChange={(e) =>
+                  updateNodeConfig(node.id, { retries: parseInt(e.target.value) || 0 })
+                }
+              />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Retry Waiting Time (seconds)</label>
+              <input
+                type="number"
+                className="form-input"
+                min="0.1"
+                step="0.1"
+                value={config.retry_waiting_time}
+                onChange={(e) =>
+                  updateNodeConfig(node.id, {
+                    retry_waiting_time: parseFloat(e.target.value) || 1,
+                  })
+                }
+              />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Token Budget</label>
+              <input
+                type="number"
+                className="form-input"
+                min="1"
+                value={config.token_budget}
+                onChange={(e) =>
+                  updateNodeConfig(node.id, {
+                    token_budget: parseInt(e.target.value) || 32768,
+                  })
+                }
+              />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Scope Window (few-shot count)</label>
+              <input
+                type="number"
+                className="form-input"
+                min="0"
+                value={config.scope_window}
+                onChange={(e) =>
+                  updateNodeConfig(node.id, {
+                    scope_window: parseInt(e.target.value) || 0,
+                  })
+                }
+              />
+            </div>
+          </div>
         </div>
 
-        <hr className="divider" />
-
-        <OutputSchemaEditor
-          responseFormat={config.response_format}
-          onChange={(rf) => updateNodeConfig(node.id, { response_format: rf })}
-        />
-
-        <hr className="divider" />
-
-        <TagListEditor
-          label="Prompts"
-          items={config.instruction}
-          newValue={newRule}
-          onNewValueChange={setNewRule}
-          onAdd={() => {
-            if (!newRule.trim()) return;
-            updateNodeConfig(node.id, {
-              instruction: [...config.instruction, newRule.trim()],
-            });
-            setNewRule("");
-          }}
-          onRemove={(index) =>
-            updateNodeConfig(node.id, {
-              instruction: config.instruction.filter((_, i) => i !== index),
-            })
-          }
-        />
-
-        <TagListEditor
-          label="Termination Conditions"
-          items={config.termination_conditions}
-          newValue={newCondition}
-          onNewValueChange={setNewCondition}
-          onAdd={() => {
-            if (!newCondition.trim()) return;
-            updateNodeConfig(node.id, {
-              termination_conditions: [
-                ...config.termination_conditions,
-                newCondition.trim(),
-              ],
-            });
-            setNewCondition("");
-          }}
-          onRemove={(index) =>
-            updateNodeConfig(node.id, {
-              termination_conditions: config.termination_conditions.filter(
-                (_, i) => i !== index
-              ),
-            })
-          }
-        />
-
-        <hr className="divider" />
-
-        <div className="form-group">
-          <label className="form-label">Retries</label>
-          <input
-            type="number"
-            className="form-input"
-            min="0"
-            value={config.retries}
-            onChange={(e) =>
-              updateNodeConfig(node.id, { retries: parseInt(e.target.value) || 0 })
-            }
-          />
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">Retry Waiting Time (seconds)</label>
-          <input
-            type="number"
-            className="form-input"
-            min="0.1"
-            step="0.1"
-            value={config.retry_waiting_time}
-            onChange={(e) =>
-              updateNodeConfig(node.id, {
-                retry_waiting_time: parseFloat(e.target.value) || 1,
-              })
-            }
-          />
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">Max Iterations</label>
-          <input
-            type="number"
-            className="form-input"
-            min="1"
-            value={config.max_iterations}
-            onChange={(e) =>
-              updateNodeConfig(node.id, {
-                max_iterations: parseInt(e.target.value) || 1,
-              })
-            }
-          />
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">Iteration Sleep (seconds)</label>
-          <input
-            type="number"
-            className="form-input"
-            min="0"
-            step="0.1"
-            value={config.iteration_sleep}
-            onChange={(e) =>
-              updateNodeConfig(node.id, {
-                iteration_sleep: parseFloat(e.target.value) || 0,
-              })
-            }
-          />
-        </div>
-
-        <hr className="divider" />
-
-        <div className="form-group">
-          <label className="form-label">Token Budget</label>
-          <input
-            type="number"
-            className="form-input"
-            min="1"
-            value={config.token_budget}
-            onChange={(e) =>
-              updateNodeConfig(node.id, {
-                token_budget: parseInt(e.target.value) || 32768,
-              })
-            }
-          />
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">Scope Window (few-shot count)</label>
-          <input
-            type="number"
-            className="form-input"
-            min="0"
-            value={config.scope_window}
-            onChange={(e) =>
-              updateNodeConfig(node.id, {
-                scope_window: parseInt(e.target.value) || 0,
-              })
-            }
-          />
-        </div>
-
-        <hr className="divider" />
-
-        <ToolDropdownEditor
-          label="Authorized Tools"
-          selectedTools={config.tools}
-          availableTools={availableTools}
-          onAdd={(toolName) =>
-            updateNodeConfig(node.id, {
-              tools: [...config.tools, toolName],
-            })
-          }
-          onRemove={(index) =>
-            updateNodeConfig(node.id, {
-              tools: config.tools.filter((_, i) => i !== index),
-            })
-          }
-        />
-
-        <div className="form-group">
-          <label className="form-label">Call Budget (max tool calls)</label>
-          <input
-            type="number"
-            className="form-input"
-            min="1"
-            value={config.call_budget}
-            onChange={(e) =>
-              updateNodeConfig(node.id, {
-                call_budget: parseInt(e.target.value) || 50,
-              })
-            }
-          />
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">Rate Limit (calls/min)</label>
-          <input
-            type="number"
-            className="form-input"
-            min="1"
-            value={config.rate_limit_per_minute}
-            onChange={(e) =>
-              updateNodeConfig(node.id, {
-                rate_limit_per_minute: parseInt(e.target.value) || 30,
-              })
-            }
-          />
+        {/* ── Tool Calling ─────────────────────────────────────── */}
+        <div className="config-section">
+          <div className="config-section-title">Tool Calling</div>
+          <div className="config-section-body">
+            <div className="form-group">
+              <label className="form-label">Calling Mode</label>
+              <select
+                className="form-select"
+                value={toolCallingMode}
+                onChange={(e) => handleToolCallingMode(e.target.value)}
+              >
+                <option value="none">None — tools disabled</option>
+                <option value="auto">Auto — LLM decides when to call tools</option>
+                <option value="required_single">Required (single) — one tool per turn</option>
+                <option value="required_multi">Required (multi) — may call several per turn</option>
+              </select>
+            </div>
+          </div>
         </div>
 
         {nodeType === NodeType.AGENT_GROUP && groupConfig && (
-          <AgentGroupConfigEditor
-            groupConfig={groupConfig}
-            nodeId={node.id}
-            availableTools={availableTools}
-            updateGroupConfig={updateGroupConfig}
-          />
+          <div className="config-section">
+            <div className="config-section-title">Agent Group</div>
+            <div className="config-section-body">
+              <AgentGroupConfigEditor
+                groupConfig={groupConfig}
+                nodeId={node.id}
+                updateGroupConfig={updateGroupConfig}
+              />
+            </div>
+          </div>
         )}
 
         <hr className="divider" />
@@ -609,7 +651,7 @@ function ToolNodeConfigPanel({
   nodeId,
   label,
   config,
-  availableTools,
+  toolHierarchy,
   updateNode,
   updateNodeConfig,
   removeNode,
@@ -618,13 +660,50 @@ function ToolNodeConfigPanel({
   nodeId: string;
   label: string;
   config: NodeConfig;
-  availableTools: string[];
+  toolHierarchy: ToolCategory[];
   updateNode: (nodeId: string, updates: Partial<{ label: string }>) => void;
   updateNodeConfig: (nodeId: string, updates: Partial<NodeConfig>) => void;
   removeNode: (nodeId: string) => void;
   setSelectedNodeId: (nodeId: string | null) => void;
 }) {
-  const selectedTool = config.tools.length > 0 ? config.tools[0] : "";
+  const currentValue = useMemo(() => {
+    if (config.tools.length === 0) return "";
+    for (const cat of toolHierarchy) {
+      if (
+        cat.tools.length === config.tools.length &&
+        cat.tools.every((t) => config.tools.includes(t))
+      ) {
+        return `category:${cat.category}`;
+      }
+    }
+    if (config.tools.length === 1) return config.tools[0];
+    return config.tools[0];
+  }, [config.tools, toolHierarchy]);
+
+  const handleSelect = useCallback(
+    (value: string) => {
+      if (!value) {
+        updateNodeConfig(nodeId, { tools: [] });
+        return;
+      }
+      if (value.startsWith("category:")) {
+        const catName = value.slice("category:".length);
+        const cat = toolHierarchy.find((c) => c.category === catName);
+        if (cat) {
+          updateNodeConfig(nodeId, { tools: [...cat.tools] });
+          if (label === "New Tool" || label === "") {
+            updateNode(nodeId, { label: cat.category });
+          }
+        }
+      } else {
+        updateNodeConfig(nodeId, { tools: [value] });
+        if (label === "New Tool" || label === "") {
+          updateNode(nodeId, { label: value });
+        }
+      }
+    },
+    [nodeId, toolHierarchy, updateNodeConfig, updateNode, label],
+  );
 
   return (
     <div className="panel">
@@ -652,54 +731,45 @@ function ToolNodeConfigPanel({
           <label className="form-label">Tool</label>
           <select
             className="form-select"
-            value={selectedTool}
-            onChange={(e) => {
-              const toolName = e.target.value;
-              updateNodeConfig(nodeId, { tools: toolName ? [toolName] : [] });
-              if (toolName && (label === "New Tool" || availableTools.includes(label))) {
-                updateNode(nodeId, { label: toolName });
-              }
-            }}
+            value={currentValue}
+            onChange={(e) => handleSelect(e.target.value)}
           >
-            <option value="">Select a tool…</option>
-            {availableTools.map((tool) => (
-              <option key={tool} value={tool}>
-                {tool}
-              </option>
-            ))}
+            <option value="">Select a tool...</option>
+            {toolHierarchy.map((category) => [
+              <option
+                key={`cat-${category.category}`}
+                value={`category:${category.category}`}
+                className="tool-category-option"
+              >
+                {category.category}
+              </option>,
+              ...category.tools.map((tool) => (
+                <option key={tool} value={tool} className="tool-child-option">
+                  {"  \u00A0\u00A0" + tool}
+                </option>
+              )),
+            ])}
           </select>
         </div>
 
+        <div className="form-group">
+          <label className="form-label toggle-label">
+            <input
+              type="checkbox"
+              checked={config.tool_strict ?? true}
+              onChange={(e) =>
+                updateNodeConfig(nodeId, { tool_strict: e.target.checked })
+              }
+            />
+            Strict Schema
+          </label>
+          <span className="text-xs text-muted">
+            Forces the LLM to conform exactly to each tool's parameter schema.
+            Prevents malformed or missing arguments.
+          </span>
+        </div>
+
         <hr className="divider" />
-
-        <div className="form-group">
-          <label className="form-label">Retries</label>
-          <input
-            type="number"
-            className="form-input"
-            min="0"
-            value={config.retries}
-            onChange={(e) =>
-              updateNodeConfig(nodeId, { retries: parseInt(e.target.value) || 0 })
-            }
-          />
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">Retry Waiting Time (seconds)</label>
-          <input
-            type="number"
-            className="form-input"
-            min="0.1"
-            step="0.1"
-            value={config.retry_waiting_time}
-            onChange={(e) =>
-              updateNodeConfig(nodeId, {
-                retry_waiting_time: parseFloat(e.target.value) || 1,
-              })
-            }
-          />
-        </div>
 
         <div className="form-group">
           <label className="form-label">Call Budget (max invocations)</label>
@@ -740,66 +810,6 @@ function ToolNodeConfigPanel({
           }}
         >
           Delete Node
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function ToolDropdownEditor({
-  label,
-  selectedTools,
-  availableTools,
-  onAdd,
-  onRemove,
-}: {
-  label: string;
-  selectedTools: string[];
-  availableTools: string[];
-  onAdd: (toolName: string) => void;
-  onRemove: (index: number) => void;
-}) {
-  const [pendingTool, setPendingTool] = useState("");
-  const unselected = availableTools.filter((t) => !selectedTools.includes(t));
-
-  return (
-    <div className="form-group">
-      <label className="form-label">{label}</label>
-      {selectedTools.length > 0 && (
-        <div className="tag-list">
-          {selectedTools.map((tool, index) => (
-            <span key={index} className="tag-item">
-              {tool}
-              <span className="tag-remove" onClick={() => onRemove(index)}>
-                &times;
-              </span>
-            </span>
-          ))}
-        </div>
-      )}
-      <div className="tag-input-row">
-        <select
-          className="form-select"
-          value={pendingTool}
-          onChange={(e) => setPendingTool(e.target.value)}
-          style={{ flex: 1 }}
-        >
-          <option value="">Select tool…</option>
-          {unselected.map((tool) => (
-            <option key={tool} value={tool}>
-              {tool}
-            </option>
-          ))}
-        </select>
-        <button
-          className="btn btn-sm"
-          onClick={() => {
-            if (!pendingTool) return;
-            onAdd(pendingTool);
-            setPendingTool("");
-          }}
-        >
-          Add
         </button>
       </div>
     </div>
@@ -934,9 +944,12 @@ function ProviderModelSelector({
           )}
         </select>
         {hintText && (
-          <span className="text-xs text-muted" style={{ marginTop: "0.25rem", display: "block" }}>
-            {hintText}
-          </span>
+          <input
+            className="form-input form-input-disabled"
+            value={hintText}
+            disabled
+            readOnly
+          />
         )}
       </div>
       <div className="form-group">
@@ -1014,12 +1027,10 @@ function TagListEditor({
 function AgentGroupConfigEditor({
   groupConfig,
   nodeId,
-  availableTools,
   updateGroupConfig,
 }: {
   groupConfig: AgentGroupConfig;
   nodeId: string;
-  availableTools: string[];
   updateGroupConfig: (nodeId: string, updates: Partial<AgentGroupConfig>) => void;
 }) {
   const [newStateKey, setNewStateKey] = useState("");
@@ -1097,37 +1108,19 @@ function AgentGroupConfigEditor({
         />
       </div>
 
-      <ToolDropdownEditor
-        label="Tool Authorization"
-        selectedTools={groupConfig.tool_authorization}
-        availableTools={availableTools}
-        onAdd={(toolName) =>
-          updateGroupConfig(nodeId, {
-            tool_authorization: [...groupConfig.tool_authorization, toolName],
-          })
-        }
-        onRemove={(index) =>
-          updateGroupConfig(nodeId, {
-            tool_authorization: groupConfig.tool_authorization.filter(
-              (_, i) => i !== index
-            ),
-          })
-        }
-      />
-
       <div className="form-group">
         <label className="form-label">Shared State</label>
-        {Object.keys(groupConfig.shared_state).length > 0 && (
+        {Object.keys(groupConfig.shared_context).length > 0 && (
           <div className="tag-list">
-            {Object.entries(groupConfig.shared_state).map(([key, value]) => (
+            {Object.entries(groupConfig.shared_context).map(([key, value]) => (
               <span key={key} className="tag-item">
                 {key}: {JSON.stringify(value)}
                 <span
                   className="tag-remove"
                   onClick={() => {
-                    const next = { ...groupConfig.shared_state };
+                    const next = { ...groupConfig.shared_context };
                     delete next[key];
-                    updateGroupConfig(nodeId, { shared_state: next });
+                    updateGroupConfig(nodeId, { shared_context: next });
                   }}
                 >
                   &times;
@@ -1162,8 +1155,8 @@ function AgentGroupConfigEditor({
                 /* use raw string */
               }
               updateGroupConfig(nodeId, {
-                shared_state: {
-                  ...groupConfig.shared_state,
+                shared_context: {
+                  ...groupConfig.shared_context,
                   [newStateKey.trim()]: parsedValue,
                 },
               });

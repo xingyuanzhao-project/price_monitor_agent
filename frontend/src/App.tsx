@@ -23,6 +23,7 @@ export default function App() {
   const setSchemas = useWorkflowStore((storeState) => storeState.setSchemas);
   const setAvailableModels = useWorkflowStore((storeState) => storeState.setAvailableModels);
   const setAvailableTools = useWorkflowStore((storeState) => storeState.setAvailableTools);
+  const setToolHierarchy = useWorkflowStore((storeState) => storeState.setToolHierarchy);
 
   const loadInitialData = useCallback(async () => {
     const [schemasResult, modelsResult, toolsResult] = await Promise.allSettled([
@@ -32,8 +33,11 @@ export default function App() {
     ]);
     if (schemasResult.status === "fulfilled") setSchemas(schemasResult.value);
     if (modelsResult.status === "fulfilled") setAvailableModels(modelsResult.value);
-    if (toolsResult.status === "fulfilled") setAvailableTools(toolsResult.value);
-  }, [setSchemas, setAvailableModels, setAvailableTools]);
+    if (toolsResult.status === "fulfilled") {
+      setAvailableTools(toolsResult.value.tools);
+      setToolHierarchy(toolsResult.value.hierarchy);
+    }
+  }, [setSchemas, setAvailableModels, setAvailableTools, setToolHierarchy]);
 
   useEffect(() => {
     loadInitialData();

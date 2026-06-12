@@ -1,69 +1,148 @@
 """
-IMF DataMapper connector.
+IMF DataMapper request builders and response parsers.
 
-Fetches macroeconomic indicators from the IMF's public JSON REST API.
-No authentication required. Covers ~190 countries.
+What it does:
+    Defines request specs and response parsers for the IMF public JSON REST
+    API.  Covers macroeconomic indicators (GDP growth, inflation, unemployment,
+    current account, government debt) for approximately 190 countries.
+    No authentication required.
 
-API base: https://www.imf.org/external/datamapper/api/v1
-Docs: https://datahelp.imf.org/knowledgebase/articles/667681
+Entities in it:
+    - BASE_URL: IMF DataMapper API v1 root.
+    - _normalize_country_codes: Uppercases comma-separated ISO 3-letter codes.
+    - Request/parse pairs for: indicator, list.
+
+How used by other modules:
+    - data_acquisition.py registers these as Endpoint pairs in DISPATCH.
+    - http.fetch() calls the request function, makes the HTTP call, then
+      passes the raw JSON to the parse function.
+
+API docs: https://datahelp.imf.org/knowledgebase/articles/667681
 """
 
 from typing import Any
 
-import httpx
 
 BASE_URL = "https://www.imf.org/external/datamapper/api/v1"
 
 
-async def fetch_indicator(
-    indicator: str = "NGDP_RPCH",
-    countries: str = "USA",
-    periods: str = "",
-) -> dict[str, Any]:
-    """Fetch an IMF indicator for specified countries.
+# ---------------------------------------------------------------------------
+# Normalization
+# ---------------------------------------------------------------------------
+
+def _normalize_country_codes(raw: str) -> list[str]:
+    """Uppercase and split comma-separated ISO 3-letter country codes.
 
     Args:
-        indicator: IMF indicator code. Common codes:
-            NGDP_RPCH (GDP growth %), PCPIPCH (inflation %),
-            LUR (unemployment rate), BCA_NGDPD (current account % GDP),
-            GGXWDG_NGDP (government gross debt % GDP).
-        countries: Comma-separated ISO 3-letter country codes (e.g. "USA,GBR,CHN").
-        periods: Comma-separated years (e.g. "2023,2024,2025"). Empty = all available.
+        raw: Comma-separated country codes (e.g. "usa,gbr,chn").
 
     Returns:
-        Dict with indicator metadata and values keyed by country -> year.
+        List of uppercased country code strings.
     """
-    url = f"{BASE_URL}/{indicator}"
-    if countries:
-        country_path = "/".join(c.strip() for c in countries.split(","))
-        url += f"/{country_path}"
-    params = {}
+    return [c.strip().upper() for c in raw.split(",") if c.strip()]
+
+
+def _normalize_indicator(raw: str) -> str:
+    """Uppercase an IMF indicator code.
+
+    Args:
+        raw: Indicator code from the LLM (e.g. "ngdp_rpch").
+
+    Returns:
+        Uppercased indicator code.
+    """
+    return raw.strip().upper()
+
+
+# ---------------------------------------------------------------------------
+# indicator
+# ---------------------------------------------------------------------------
+
+def indicator_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for an IMF indicator across countries.
+
+    Args:
+        **kwargs: Generic LLM params.  Uses ``indicator``, ``country``
+                  (comma-separated ISO3 codes), ``periods`` (comma-separated
+                  years).
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    indicator = _normalize_indicator(kwargs.get("indicator", "NGDP_RPCH"))
+    countries_raw = kwargs.get("country", "USA")
+    periods = kwargs.get("periods", "")
+
+    country_list = _normalize_country_codes(countries_raw)
+    country_path = "/".join(country_list) if country_list else ""
+
+    path = f"/{indicator}"
+    if country_path:
+        path += f"/{country_path}"
+
+    params: dict[str, Any] = {}
     if periods:
         params["periods"] = periods
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        values = data.get("values", {}).get(indicator, {})
-        return {
-            "indicator": indicator,
-            "data": values,
-        }
+
+    return {
+        "path": path,
+        "params": params if params else None,
+        "timeout": 15.0,
+    }
 
 
-async def list_indicators() -> list[dict[str, Any]]:
-    """List all available IMF DataMapper indicators.
+def indicator_parse(data: dict) -> dict[str, Any]:
+    """Parse IMF indicator JSON response.
+
+    Args:
+        data: Raw JSON dict from the API.
+
+    Returns:
+        Dict with indicator code and data keyed by country then year.
+    """
+    indicator_keys = [k for k in data.get("values", {}).keys()]
+    indicator = indicator_keys[0] if indicator_keys else ""
+    values = data.get("values", {}).get(indicator, {})
+    return {
+        "indicator": indicator,
+        "data": values,
+    }
+
+
+# ---------------------------------------------------------------------------
+# list (all available indicators)
+# ---------------------------------------------------------------------------
+
+def list_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for listing all IMF DataMapper indicators.
+
+    Args:
+        **kwargs: Generic LLM params.  None required.
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    return {
+        "path": "/indicators",
+        "timeout": 15.0,
+    }
+
+
+def list_parse(data: dict) -> list[dict[str, Any]]:
+    """Parse IMF indicator listing JSON response.
+
+    Args:
+        data: Raw JSON dict from the API.
 
     Returns:
         List of dicts with indicator code, label, and description.
     """
-    url = f"{BASE_URL}/indicators"
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        data = resp.json()
-        indicators = data.get("indicators", {})
-        return [
-            {"code": code, "label": meta.get("label", ""), "description": meta.get("description", "")}
-            for code, meta in indicators.items()
-        ]
+    indicators = data.get("indicators", {})
+    return [
+        {
+            "code": code,
+            "label": meta.get("label", ""),
+            "description": meta.get("description", ""),
+        }
+        for code, meta in indicators.items()
+    ]

@@ -196,8 +196,8 @@ export function Combobox({
             width: "100%",
             overflowY: "auto",
             borderRadius: "0.375rem",
-            border: "1px solid var(--border-color, #e2e8f0)",
-            backgroundColor: "var(--bg-panel, #fff)",
+            border: "1px solid var(--color-border, #2a3a5c)",
+            backgroundColor: "var(--color-bg-secondary, #16213e)",
             fontSize: "0.875rem",
             boxShadow: "0 4px 6px -1px rgba(0,0,0,0.1)",
             listStyle: "none",
@@ -228,7 +228,7 @@ export function Combobox({
                   cursor: "pointer",
                   backgroundColor:
                     idx === highlightIdx
-                      ? "var(--accent-bg, #f1f5f9)"
+                      ? "var(--color-bg-surface, #1e2a45)"
                       : "transparent",
                   fontWeight: opt.value === value ? 600 : 400,
                 }}

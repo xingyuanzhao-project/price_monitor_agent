@@ -86,13 +86,18 @@ class LLMProvider:
         messages: list[dict],
         tools: Optional[list[dict]] = None,
         response_format: Optional[dict] = None,
+        tool_choice: Optional[str] = None,
+        parallel_tool_calls: Optional[bool] = None,
     ) -> dict:
         """Make a non-streaming chat completion request.
 
         Returns:
             dict: The API response as a dictionary with choices.
         """
-        kwargs = self._build_kwargs(messages, tools, response_format, stream=False)
+        kwargs = self._build_kwargs(
+            messages, tools, response_format, stream=False,
+            tool_choice=tool_choice, parallel_tool_calls=parallel_tool_calls,
+        )
         kwargs = normalize_request_kwargs(self.provider, kwargs)
         _LOGGER.info("LLM request → provider=%s model=%s messages=%d tools=%d",
                      self.provider, self.model_id, len(messages),
@@ -120,7 +125,7 @@ class LLMProvider:
 
         result = response.model_dump()
         choice = result.get("choices", [{}])[0] if result.get("choices") else {}
-        content = (choice.get("message") or {}).get("content", "")
+        content = (choice.get("message") or {}).get("content") or ""
         _LOGGER.info("LLM response ← model=%s finish=%s content_length=%d",
                      self.model_id,
                      choice.get("finish_reason", "?"),
@@ -132,13 +137,18 @@ class LLMProvider:
         messages: list[dict],
         tools: Optional[list[dict]] = None,
         response_format: Optional[dict] = None,
+        tool_choice: Optional[str] = None,
+        parallel_tool_calls: Optional[bool] = None,
     ) -> AsyncIterator[dict]:
         """Make a streaming chat completion request.
 
         Yields:
             dict: Parsed SSE chunk dictionaries.
         """
-        kwargs = self._build_kwargs(messages, tools, response_format, stream=True)
+        kwargs = self._build_kwargs(
+            messages, tools, response_format, stream=True,
+            tool_choice=tool_choice, parallel_tool_calls=parallel_tool_calls,
+        )
         kwargs = normalize_request_kwargs(self.provider, kwargs)
 
         try:
@@ -176,6 +186,8 @@ class LLMProvider:
         tools: Optional[list[dict]],
         response_format: Optional[dict],
         stream: bool,
+        tool_choice: Optional[str] = None,
+        parallel_tool_calls: Optional[bool] = None,
     ) -> dict:
         """Build keyword arguments for the chat completions create call."""
         kwargs: dict = {
@@ -190,6 +202,10 @@ class LLMProvider:
 
         if tools:
             kwargs["tools"] = tools
+            if tool_choice is not None:
+                kwargs["tool_choice"] = tool_choice
+            if parallel_tool_calls is not None:
+                kwargs["parallel_tool_calls"] = parallel_tool_calls
 
         if response_format:
             kwargs["response_format"] = response_format

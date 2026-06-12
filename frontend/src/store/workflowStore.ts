@@ -7,6 +7,7 @@
  */
 
 import { create } from "zustand";
+import { MarkerType } from "@xyflow/react";
 import type { Node, Edge } from "@xyflow/react";
 import type {
   WorkflowSchema,
@@ -18,6 +19,7 @@ import type {
   LoggingLevel,
   NodeType,
   EdgeType,
+  ToolCategory,
 } from "../types/schema";
 
 interface WorkflowState {
@@ -31,11 +33,13 @@ interface WorkflowState {
   schemas: WorkflowSchema[];
   availableModels: string[];
   availableTools: string[];
+  toolHierarchy: ToolCategory[];
   modelsByProvider: Record<string, { id: string; label: string }[]>;
 
   setSchemas: (schemas: WorkflowSchema[]) => void;
   setAvailableModels: (models: string[]) => void;
   setAvailableTools: (tools: string[]) => void;
+  setToolHierarchy: (hierarchy: ToolCategory[]) => void;
   setModelsForProvider: (provider: string, models: { id: string; label: string }[]) => void;
   fetchModelsForProvider: (provider: string) => Promise<{ id: string; label: string }[]>;
 
@@ -68,6 +72,23 @@ const EDGE_TYPE_STYLES: Record<EdgeType, { stroke: string; strokeDasharray?: str
   synchronization: { stroke: "#f59e0b", strokeDasharray: "6 3" },
 };
 
+/**
+ * Which node ports each edge type connects. Single source of truth:
+ * the canvas reads it to type a drawn connection from its handles, and
+ * the converter below reads it to restore handles when loading a schema.
+ */
+export const EDGE_TYPE_PORTS: Record<EdgeType, { sourceHandle: string; targetHandle: string }> = {
+  data_flow: { sourceHandle: "out", targetHandle: "in" },
+  tool_call: { sourceHandle: "tool", targetHandle: "call" },
+  synchronization: { sourceHandle: "out", targetHandle: "in" },
+};
+
+const EDGE_TYPE_COMPONENTS: Record<EdgeType, string> = {
+  data_flow: "dataFlow",
+  tool_call: "toolCall",
+  synchronization: "straight",
+};
+
 function nodeDefinitionToReactFlowNode(definition: NodeDefinition): Node {
   return {
     id: definition.node_id,
@@ -84,13 +105,20 @@ function nodeDefinitionToReactFlowNode(definition: NodeDefinition): Node {
 
 function edgeDefinitionToReactFlowEdge(definition: EdgeDefinition): Edge {
   const style = EDGE_TYPE_STYLES[definition.edge_type];
+  const ports = EDGE_TYPE_PORTS[definition.edge_type];
   return {
     id: definition.edge_id,
     source: definition.source_node_id,
     target: definition.target_node_id,
-    type: definition.edge_type === "synchronization" ? "straight" : "smoothstep",
+    sourceHandle: ports.sourceHandle,
+    targetHandle: ports.targetHandle,
+    type: EDGE_TYPE_COMPONENTS[definition.edge_type],
     animated: definition.edge_type === "synchronization",
     style,
+    // The tool_call edge draws its own call-and-return arrows.
+    ...(definition.edge_type !== "tool_call" && {
+      markerEnd: { type: MarkerType.ArrowClosed, color: style.stroke },
+    }),
     data: { edgeType: definition.edge_type },
   };
 }
@@ -107,19 +135,23 @@ function reactFlowNodeToDefinition(node: Node): NodeDefinition {
 }
 
 function reactFlowEdgeToDefinition(edge: Edge): EdgeDefinition {
+  // Every edge is built by edgeDefinitionToReactFlowEdge, which always
+  // stamps data.edgeType; absence would be a construction bug.
   return {
     edge_id: edge.id,
-    edge_type: (edge.data?.edgeType as EdgeType) ?? "data_flow",
+    edge_type: edge.data!.edgeType as EdgeType,
     source_node_id: edge.source,
     target_node_id: edge.target,
   };
 }
 
-const DEFAULT_WORKFLOW_CONFIG: WorkflowConfig = {
+export const DEFAULT_WORKFLOW_CONFIG: WorkflowConfig = {
   total_timeout: 300,
   logging_level: "info" as LoggingLevel,
   trace_enabled: true,
-  dead_loop_detection: true,
+  max_loop_rounds: 3,
+  max_iterations: 10,
+  iteration_sleep: 0,
 };
 
 export const useWorkflowStore = create<WorkflowState>((set, get) => ({
@@ -133,11 +165,13 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   schemas: [],
   availableModels: [],
   availableTools: [],
+  toolHierarchy: [],
   modelsByProvider: {},
 
   setSchemas: (schemas) => set({ schemas }),
   setAvailableModels: (models) => set({ availableModels: models }),
   setAvailableTools: (tools) => set({ availableTools: tools }),
+  setToolHierarchy: (hierarchy) => set({ toolHierarchy: hierarchy }),
   setModelsForProvider: (provider, models) =>
     set((state) => ({
       modelsByProvider: { ...state.modelsByProvider, [provider]: models },
@@ -170,7 +204,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       schemaDescription: schema.description,
       nodes: schema.nodes.map(nodeDefinitionToReactFlowNode),
       edges: schema.edges.map(edgeDefinitionToReactFlowEdge),
-      workflowConfig: schema.config,
+      workflowConfig: { ...DEFAULT_WORKFLOW_CONFIG, ...schema.config },
       selectedNodeId: null,
     }),
 
@@ -243,8 +277,9 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
           min_agents: 2,
           max_agents: 10,
           group_structure: "default",
-          shared_state: {},
+          shared_context: {},
           tool_authorization: [],
+          sub_agent_read_group_state: true,
         };
         return {
           ...node,

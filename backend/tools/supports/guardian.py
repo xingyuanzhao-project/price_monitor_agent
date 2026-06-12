@@ -1,95 +1,150 @@
 """
-The Guardian Open Platform API support.
+The Guardian Open Platform request builders and response parsers.
 
-Fetches headlines, articles, and search results from The Guardian's free API.
-No authentication required for basic access (test key available).
+What it does:
+    Defines request specs and response parsers for The Guardian's content API.
+    Fetches headlines, articles, and search results.  Requires an API key
+    (``"test"`` available for development access).
 
-API base: https://content.guardianapis.com/
-Docs: https://open-platform.theguardian.com/documentation/
+Entities in it:
+    - BASE_URL: Guardian content API root.
+    - _normalize_section: Lowercases section slug.
+    - Request/parse pairs for: search, headlines.
+
+How used by other modules:
+    - data_acquisition.py registers these as Endpoint pairs in DISPATCH.
+    - http.fetch() calls the request function, makes the HTTP call, then
+      passes the raw JSON to the parse function.
+
+API docs: https://open-platform.theguardian.com/documentation/
 """
 
 from typing import Any
 
-import httpx
 
 BASE_URL = "https://content.guardianapis.com"
 
 
-async def search_content(
-    query: str,
-    api_key: str = "test",
-    page_size: int = 20,
-    order_by: str = "newest",
-) -> list[dict[str, Any]]:
-    """Search Guardian content.
+# ---------------------------------------------------------------------------
+# Normalization
+# ---------------------------------------------------------------------------
+
+def _normalize_section(raw: str) -> str:
+    """Lowercase the Guardian section slug.
 
     Args:
-        query: Search query string.
-        api_key: Guardian API key ("test" for development access).
-        page_size: Number of results (max 50).
-        order_by: "newest", "oldest", or "relevance".
+        raw: Section string from the LLM (e.g. "Business", "TECHNOLOGY").
 
     Returns:
-        List of article dicts with id, title, section, date, url.
+        Lowercased section slug.
     """
-    url = f"{BASE_URL}/search"
-    params = {
+    return raw.strip().lower()
+
+
+# ---------------------------------------------------------------------------
+# search
+# ---------------------------------------------------------------------------
+
+def search_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for Guardian content search.
+
+    Args:
+        **kwargs: Generic LLM params.  Uses ``query``, ``api_key``,
+                  ``limit``, ``order_by``, ``from_date``, ``to_date``.
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    query = kwargs.get("query", "")
+    api_key = kwargs.get("api_key", "test")
+    page_size = min(int(kwargs.get("limit", 20)), 50)
+    order_by = kwargs.get("order_by", "newest")
+
+    params: dict[str, Any] = {
         "q": query,
         "api-key": api_key,
-        "page-size": min(page_size, 50),
+        "page-size": page_size,
         "order-by": order_by,
         "show-fields": "headline,trailText,byline",
     }
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        results = data.get("response", {}).get("results", [])
-        return [
-            {
-                "id": r["id"],
-                "title": r.get("webTitle", ""),
-                "section": r.get("sectionName", ""),
-                "date": r.get("webPublicationDate", ""),
-                "url": r.get("webUrl", ""),
-                "headline": r.get("fields", {}).get("headline", ""),
-                "trail_text": r.get("fields", {}).get("trailText", ""),
-            }
-            for r in results
-        ]
+    from_date = kwargs.get("from_date", "")
+    if from_date:
+        params["from-date"] = from_date
+    to_date = kwargs.get("to_date", "")
+    if to_date:
+        params["to-date"] = to_date
+
+    return {"path": "/search", "params": params}
 
 
-async def fetch_section_headlines(
-    section: str = "business",
-    api_key: str = "test",
-    page_size: int = 20,
-) -> list[dict[str, Any]]:
-    """Fetch latest headlines from a specific section.
+def search_parse(data: dict) -> list[dict[str, Any]]:
+    """Parse Guardian content search JSON response.
 
     Args:
-        section: Guardian section ID (e.g. "business", "technology", "world").
-        api_key: Guardian API key.
-        page_size: Number of results.
+        data: Raw JSON dict from the API.
+
+    Returns:
+        List of article dicts with id, title, section, date, url, headline,
+        trail_text.
+    """
+    results = data.get("response", {}).get("results", [])
+    return [
+        {
+            "id": r["id"],
+            "title": r.get("webTitle", ""),
+            "section": r.get("sectionName", ""),
+            "date": r.get("webPublicationDate", ""),
+            "url": r.get("webUrl", ""),
+            "headline": r.get("fields", {}).get("headline", ""),
+            "trail_text": r.get("fields", {}).get("trailText", ""),
+        }
+        for r in results
+    ]
+
+
+# ---------------------------------------------------------------------------
+# headlines
+# ---------------------------------------------------------------------------
+
+def headlines_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for latest headlines from a Guardian section.
+
+    Args:
+        **kwargs: Generic LLM params.  Uses ``section``, ``api_key``,
+                  ``limit``.
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    section = _normalize_section(kwargs.get("section", "business"))
+    api_key = kwargs.get("api_key", "test")
+    page_size = min(int(kwargs.get("limit", 20)), 50)
+
+    return {
+        "path": f"/{section}",
+        "params": {
+            "api-key": api_key,
+            "page-size": page_size,
+            "order-by": "newest",
+        },
+    }
+
+
+def headlines_parse(data: dict) -> list[dict[str, Any]]:
+    """Parse Guardian section headlines JSON response.
+
+    Args:
+        data: Raw JSON dict from the API.
 
     Returns:
         List of headline dicts with title, date, url.
     """
-    url = f"{BASE_URL}/{section}"
-    params = {
-        "api-key": api_key,
-        "page-size": min(page_size, 50),
-        "order-by": "newest",
-    }
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        results = data.get("response", {}).get("results", [])
-        return [
-            {
-                "title": r.get("webTitle", ""),
-                "date": r.get("webPublicationDate", ""),
-                "url": r.get("webUrl", ""),
-            }
-            for r in results
-        ]
+    results = data.get("response", {}).get("results", [])
+    return [
+        {
+            "title": r.get("webTitle", ""),
+            "date": r.get("webPublicationDate", ""),
+            "url": r.get("webUrl", ""),
+        }
+        for r in results
+    ]

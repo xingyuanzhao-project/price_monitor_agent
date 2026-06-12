@@ -2,11 +2,12 @@
 Orchestration subpackage for workflow scheduling and execution.
 
 What it does:
-    Turns a validated WorkflowSchema into a staged execution plan (via
-    topological sort with synchronization constraints) and then runs each
-    stage in parallel, wiring up context and execution harnesses per node,
-    invoking CoreAgent or AgentGroup, enforcing guardrails, and recording
-    the full run as a RunRecord.
+    Turns a validated WorkflowSchema into a staged, loop-aware execution
+    plan (SCC condensation with synchronization constraints; drawn
+    cycles become explicit loop units) and then runs each stage's units
+    in parallel, wiring up context and execution harnesses per node,
+    invoking CoreAgent or AgentGroup, enforcing guardrails, and
+    recording the full run as a RunRecord.
 
 Entities in it:
     - scheduler: ExecutionScheduler, ExecutionPlan.

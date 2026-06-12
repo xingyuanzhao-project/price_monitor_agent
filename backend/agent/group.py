@@ -18,7 +18,7 @@ What it does:
     Tool authorization is enforced: sub-agents only receive tool definitions
     for tools listed in ``AgentGroupConfig.tool_authorization``.
 
-    Shared state is read at startup (injected into each sub-agent's context)
+    Group context is read at startup (injected into each sub-agent's prompt)
     and written after each sub-agent completes (updated with its output).
 
     Each sub-agent receives its own ContextHarness built from the planner's
@@ -46,6 +46,7 @@ from backend.agent.llm_provider import LLMProvider
 from backend.harness.context import ContextHarness
 from backend.prompts import load_prompt_template
 from backend.schema.models import AgentGroupConfig, GroupStructure, NodeConfig
+from backend.state import GroupState
 
 
 class AgentGroup:
@@ -55,7 +56,7 @@ class AgentGroup:
         Uses an internal LLM planner phase to break the task into sub-agent
         assignments, then executes according to ``group_config.group_structure``.
         Tool authorization is gated by ``group_config.tool_authorization``.
-        Shared state from ``group_config.shared_state`` is injected into each
+        Group context from ``group_config.shared_context`` is injected into each
         sub-agent and updated after each sub-agent completes.
 
     Attributes:
@@ -66,7 +67,7 @@ class AgentGroup:
             authorization settings.
         llm_provider: LLMProvider for the planner and sub-agent LLM calls.
         tool_call_handler: Async callable for executing tool calls.
-        stream_callback: Optional async callable for streaming events.
+        emit_event: Optional async-compatible callback for trace events.
 
     Methods:
         execute: Plan and execute the agent group.
@@ -80,7 +81,7 @@ class AgentGroup:
         group_config: AgentGroupConfig,
         llm_provider: LLMProvider,
         tool_call_handler: Callable,
-        stream_callback: Optional[Callable] = None,
+        emit_event: Optional[Callable] = None,
     ) -> None:
         """Initialize the AgentGroup with its configuration and dependencies.
 
@@ -95,8 +96,9 @@ class AgentGroup:
             group_config (AgentGroupConfig): Group orchestration configuration.
             llm_provider (LLMProvider): Provider for LLM API calls.
             tool_call_handler (Callable): Async function to execute tool calls.
-                Signature: async (tool_name: str, tool_args: dict) -> Any
-            stream_callback (Optional[Callable]): Optional streaming callback.
+                Signature: async (assistant_message: dict) -> list[dict]
+            emit_event (Optional[Callable]): Optional async-compatible callback
+                for trace events.
 
         Returns:
             None
@@ -107,12 +109,19 @@ class AgentGroup:
         self.group_config = group_config
         self.llm_provider = llm_provider
         self.tool_call_handler = tool_call_handler
-        self.stream_callback = stream_callback
+        self.emit_event = emit_event
+        # Loop bound and pacing for sub-agents, supplied by orchestration
+        # in execute() from the workflow config (not per-node).
+        self._max_iterations: int = 0
+        self._iteration_sleep: float = 0.0
 
     async def execute(
         self,
         messages: list[dict],
         tools: Optional[list[dict]] = None,
+        *,
+        max_iterations: int,
+        iteration_sleep: float,
     ) -> dict:
         """Plan and execute the agent group.
 
@@ -126,6 +135,10 @@ class AgentGroup:
             messages (list[dict]): Input conversation messages for the group.
             tools (Optional[list[dict]]): Full tool definitions available to
                 sub-agents before authorization filtering.
+            max_iterations (int): Agentic-loop ceiling for each sub-agent,
+                from the workflow config.
+            iteration_sleep (float): Inter-iteration sleep for each
+                sub-agent, from the workflow config.
 
         Returns:
             dict: Result dictionary with keys:
@@ -138,22 +151,25 @@ class AgentGroup:
             AgentExecutionError: If planner returns invalid JSON, agent count
                 violates bounds, or sub-agent execution fails.
         """
-        # Authorised tools are the intersection of what the executor supplied
-        # and what group_config.tool_authorization explicitly permits.
+        self._max_iterations = max_iterations
+        self._iteration_sleep = iteration_sleep
         authorized_tool_definitions = self._filter_authorized_tools(tools)
 
-        # Read shared state from config and make a mutable copy.
-        shared_state: dict[str, Any] = dict(self.group_config.shared_state)
+        group_context: dict[str, Any] = dict(self.group_config.shared_context)
+        self._group_state = GroupState(
+            group_node_id=self.node_id,
+            context=dict(group_context),
+        )
 
         structure = self.group_config.group_structure
         _LOGGER.info("[%s] AgentGroup starting — structure=%s", self.node_id, structure.value)
         if structure == GroupStructure.DEFAULT:
             sub_agent_plans, chosen_structure = await self._run_default_planner_phase(
-                messages, shared_state
+                messages, group_context
             )
         else:
             sub_agent_plans = await self._run_planner_phase(
-                messages, shared_state, structure
+                messages, group_context, structure
             )
             chosen_structure = structure
 
@@ -163,19 +179,19 @@ class AgentGroup:
 
         if chosen_structure == GroupStructure.PARALLEL:
             sub_agent_results = await self._execute_parallel(
-                sub_agent_plans, messages, authorized_tool_definitions, shared_state
+                sub_agent_plans, messages, authorized_tool_definitions, group_context
             )
         elif chosen_structure == GroupStructure.SEQUENTIAL:
             sub_agent_results = await self._execute_sequential(
-                sub_agent_plans, messages, authorized_tool_definitions, shared_state
+                sub_agent_plans, messages, authorized_tool_definitions, group_context
             )
         elif chosen_structure == GroupStructure.PYRAMID:
             sub_agent_results = await self._execute_pyramid(
-                sub_agent_plans, messages, authorized_tool_definitions, shared_state
+                sub_agent_plans, messages, authorized_tool_definitions, group_context
             )
         else:
             sub_agent_results = await self._execute_parallel(
-                sub_agent_plans, messages, authorized_tool_definitions, shared_state
+                sub_agent_plans, messages, authorized_tool_definitions, group_context
             )
 
         aggregated_content = self._aggregate_results(sub_agent_results)
@@ -192,7 +208,7 @@ class AgentGroup:
     async def _run_planner_phase(
         self,
         messages: list[dict],
-        shared_state: dict[str, Any],
+        group_context: dict[str, Any],
         structure: GroupStructure,
     ) -> list[dict]:
         """Run the planner LLM call to decompose the task into sub-agent assignments.
@@ -204,7 +220,7 @@ class AgentGroup:
 
         Params:
             messages (list[dict]): Input conversation context for planning.
-            shared_state (dict[str, Any]): Current shared state to inform planning.
+            group_context (dict[str, Any]): Group context to inform planning.
             structure (GroupStructure): The execution structure to plan for.
 
         Returns:
@@ -213,11 +229,11 @@ class AgentGroup:
         Raises:
             AgentExecutionError: If the LLM returns invalid JSON or missing structure.
         """
-        shared_state_summary = json.dumps(shared_state, default=str) if shared_state else "none"
+        context_summary = json.dumps(group_context, default=str) if group_context else "none"
         template = load_prompt_template("group_planner_structured.json")
         prompt_content = template.format(
             structure=structure.value,
-            shared_state=shared_state_summary,
+            shared_state=context_summary,
             min_agents=self.group_config.min_agents,
             max_agents=self.group_config.max_agents,
         )
@@ -244,7 +260,7 @@ class AgentGroup:
     async def _run_default_planner_phase(
         self,
         messages: list[dict],
-        shared_state: dict[str, Any],
+        group_context: dict[str, Any],
     ) -> tuple[list[dict], GroupStructure]:
         """Run the DEFAULT planner that also decides the execution structure.
 
@@ -256,7 +272,7 @@ class AgentGroup:
 
         Params:
             messages (list[dict]): Input conversation context for planning.
-            shared_state (dict[str, Any]): Current shared state to inform planning.
+            group_context (dict[str, Any]): Group context to inform planning.
 
         Returns:
             tuple[list[dict], GroupStructure]: Sub-agent plans and the chosen
@@ -265,10 +281,10 @@ class AgentGroup:
         Raises:
             AgentExecutionError: If the LLM returns invalid JSON or invalid structure.
         """
-        shared_state_summary = json.dumps(shared_state, default=str) if shared_state else "none"
+        context_summary = json.dumps(group_context, default=str) if group_context else "none"
         template = load_prompt_template("group_planner_default.json")
         prompt_content = template.format(
-            shared_state=shared_state_summary,
+            shared_state=context_summary,
             min_agents=self.group_config.min_agents,
             max_agents=self.group_config.max_agents,
         )
@@ -418,20 +434,20 @@ class AgentGroup:
         sub_agent_plans: list[dict],
         messages: list[dict],
         authorized_tools: Optional[list[dict]],
-        shared_state: dict[str, Any],
+        group_context: dict[str, Any],
     ) -> list[dict]:
         """Execute all sub-agents concurrently using asyncio.gather.
 
         Description:
             Creates and runs all sub-agents in parallel, bounded by
-            max_parallel_agents using a semaphore.  Each sub-agent updates
-            the shared_state upon completion.
+            max_parallel_agents using a semaphore.  Each sub-agent's output
+            is written back to group_context upon completion.
 
         Params:
             sub_agent_plans (list[dict]): Plans for each sub-agent.
             messages (list[dict]): Base conversation context.
             authorized_tools (Optional[list[dict]]): Filtered tool definitions.
-            shared_state (dict[str, Any]): Mutable shared state for this group.
+            group_context (dict[str, Any]): Mutable group context.
 
         Returns:
             list[dict]: Results from all sub-agents.
@@ -441,11 +457,10 @@ class AgentGroup:
         async def run_with_semaphore(plan: dict, agent_index: int) -> dict:
             async with semaphore:
                 result = await self._execute_single_sub_agent(
-                    plan, agent_index, messages, authorized_tools, shared_state
+                    plan, agent_index, messages, authorized_tools, group_context
                 )
-                # Write completed agent output back to shared state.
                 agent_id = plan.get("agent_id", f"{self.node_id}_sub_{agent_index}")
-                shared_state[agent_id] = result.get("content", "")
+                group_context[agent_id] = result.get("content", "")
                 return result
 
         tasks = [
@@ -460,20 +475,20 @@ class AgentGroup:
         sub_agent_plans: list[dict],
         messages: list[dict],
         authorized_tools: Optional[list[dict]],
-        shared_state: dict[str, Any],
+        group_context: dict[str, Any],
     ) -> list[dict]:
         """Execute sub-agents one after another, chaining context.
 
         Description:
             Runs each sub-agent sequentially, passing the previous agent's
-            output as additional context to the next agent.  Shared state is
+            output as additional context to the next agent.  Group context is
             updated after each agent completes.
 
         Params:
             sub_agent_plans (list[dict]): Plans for each sub-agent.
             messages (list[dict]): Base conversation context.
             authorized_tools (Optional[list[dict]]): Filtered tool definitions.
-            shared_state (dict[str, Any]): Mutable shared state for this group.
+            group_context (dict[str, Any]): Mutable group context.
 
         Returns:
             list[dict]: Results from all sub-agents in execution order.
@@ -483,12 +498,12 @@ class AgentGroup:
 
         for index, plan in enumerate(sub_agent_plans):
             result = await self._execute_single_sub_agent(
-                plan, index, accumulated_context, authorized_tools, shared_state
+                plan, index, accumulated_context, authorized_tools, group_context
             )
             results.append(result)
 
             agent_id = plan.get("agent_id", f"{self.node_id}_sub_{index}")
-            shared_state[agent_id] = result.get("content", "")
+            group_context[agent_id] = result.get("content", "")
 
             accumulated_context.append({
                 "role": "assistant",
@@ -502,20 +517,20 @@ class AgentGroup:
         sub_agent_plans: list[dict],
         messages: list[dict],
         authorized_tools: Optional[list[dict]],
-        shared_state: dict[str, Any],
+        group_context: dict[str, Any],
     ) -> list[dict]:
         """Execute with a lead agent followed by parallel workers.
 
         Description:
             The first sub-agent acts as the lead (executed first). Its output
-            is added to shared state and context, then remaining agents execute
-            in parallel using the enriched context.
+            is added to group context, then remaining agents execute in
+            parallel using the enriched context.
 
         Params:
             sub_agent_plans (list[dict]): Plans for each sub-agent.
             messages (list[dict]): Base conversation context.
             authorized_tools (Optional[list[dict]]): Filtered tool definitions.
-            shared_state (dict[str, Any]): Mutable shared state for this group.
+            group_context (dict[str, Any]): Mutable group context.
 
         Returns:
             list[dict]: Results from lead agent followed by parallel workers.
@@ -524,10 +539,10 @@ class AgentGroup:
         worker_plans = sub_agent_plans[1:]
 
         lead_result = await self._execute_single_sub_agent(
-            lead_plan, 0, messages, authorized_tools, shared_state
+            lead_plan, 0, messages, authorized_tools, group_context
         )
         lead_agent_id = lead_plan.get("agent_id", f"{self.node_id}_sub_0")
-        shared_state[lead_agent_id] = lead_result.get("content", "")
+        group_context[lead_agent_id] = lead_result.get("content", "")
 
         enriched_messages = list(messages) + [{
             "role": "assistant",
@@ -540,10 +555,10 @@ class AgentGroup:
             async def run_worker(plan: dict, worker_index: int) -> dict:
                 async with semaphore:
                     result = await self._execute_single_sub_agent(
-                        plan, worker_index + 1, enriched_messages, authorized_tools, shared_state
+                        plan, worker_index + 1, enriched_messages, authorized_tools, group_context
                     )
                     worker_agent_id = plan.get("agent_id", f"{self.node_id}_sub_{worker_index + 1}")
-                    shared_state[worker_agent_id] = result.get("content", "")
+                    group_context[worker_agent_id] = result.get("content", "")
                     return result
 
             worker_tasks = [
@@ -563,13 +578,13 @@ class AgentGroup:
         agent_index: int,
         messages: list[dict],
         authorized_tools: Optional[list[dict]],
-        shared_state: dict[str, Any],
+        group_context: dict[str, Any],
     ) -> dict:
         """Create and execute a single sub-agent from its plan.
 
         Description:
             Constructs a ContextHarness from the plan's context_instructions
-            and shared_state, then creates a CoreAgent and runs it.  The
+            and group_context, then creates a CoreAgent and runs it.  The
             ContextHarness gives the sub-agent scoped context built by the
             planner rather than raw messages.
 
@@ -579,7 +594,7 @@ class AgentGroup:
             agent_index (int): Index of this agent in the group.
             messages (list[dict]): Conversation context for this agent.
             authorized_tools (Optional[list[dict]]): Filtered tool definitions.
-            shared_state (dict[str, Any]): Current shared state for context.
+            group_context (dict[str, Any]): Current group context.
 
         Returns:
             dict: The sub-agent's execution result.
@@ -592,23 +607,18 @@ class AgentGroup:
             f"Your assigned task: {task_description}. Focus: {focus_area}.",
         )
 
-        # Build a ContextHarness for this sub-agent so it has its own scoped
-        # context with the planner's instructions and the current shared state.
         sub_agent_harness = ContextHarness(
             system_prompt=context_instructions,
             instruction=self.config.instruction,
             token_budget=self.config.token_budget,
             scope_window=self.config.scope_window,
             guardrail_rules=[],
-            state=dict(shared_state),
             few_shot_examples=self.config.few_shot_examples,
         )
-        sub_agent_harness.merge_upstream_state(shared_state)
 
-        # Assemble scoped messages through the sub-agent's harness.
         upstream_data: dict[str, str] = {
             source_id: content
-            for source_id, content in shared_state.items()
+            for source_id, content in group_context.items()
             if isinstance(content, str)
         }
         sub_agent_messages = sub_agent_harness.assemble_messages(
@@ -617,16 +627,28 @@ class AgentGroup:
             tool_results=[],
         )
 
+        sub_node_state = self._group_state.register_sub_agent(
+            agent_id=agent_id,
+            task=task_description,
+            max_iterations=self._max_iterations,
+        )
+        sub_node_state.start()
+
         sub_agent = CoreAgent(
             node_id=agent_id,
             label=f"{self.label} — Sub-agent {agent_index}",
             config=self.config,
             llm_provider=self.llm_provider,
             tool_call_handler=self.tool_call_handler,
-            stream_callback=self.stream_callback,
+            emit_event=self.emit_event,
+            node_state=sub_node_state,
         )
 
-        result = await sub_agent.execute(sub_agent_messages, authorized_tools)
+        result = await sub_agent.execute(
+            sub_agent_messages, authorized_tools,
+            max_iterations=self._max_iterations,
+            iteration_sleep=self._iteration_sleep,
+        )
         result["agent_id"] = agent_id
         result["task"] = task_description
         return result

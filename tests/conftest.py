@@ -9,7 +9,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from backend.tools.registry import ToolRegistry
-from backend.tools.data_acquisition import FetchDataTool
+from backend.tools.data_acquisition import (
+    FetchExchangeDataTool,
+    FetchMacroDataTool,
+    FetchNewsDataTool,
+    FetchSocialMediaDataTool,
+)
 from backend.tools.financial_analysis import (
     TechnicalAnalysisTool,
     QuantitativeAnalysisTool,
@@ -47,7 +52,10 @@ def openrouter_api_key() -> str:
 def tool_registry() -> ToolRegistry:
     registry = ToolRegistry()
     for tool_instance in [
-        FetchDataTool(),
+        FetchExchangeDataTool(),
+        FetchMacroDataTool(),
+        FetchNewsDataTool(),
+        FetchSocialMediaDataTool(),
         TechnicalAnalysisTool(),
         QuantitativeAnalysisTool(),
         SignalAnalysisTool(),

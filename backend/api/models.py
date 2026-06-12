@@ -103,8 +103,11 @@ async def list_models() -> dict[str, Any]:
 
 @router.get("/tools")
 async def list_tools() -> dict[str, Any]:
-    """List all registered tools with their parameter schemas."""
-    return {"tools": _tool_registry.get_tool_definitions()}
+    """List all registered tools with their parameter schemas and hierarchy."""
+    return {
+        "tools": _tool_registry.get_tool_definitions(),
+        "hierarchy": _tool_registry.get_tool_hierarchy(),
+    }
 
 
 @router.get("/{provider_name}")

@@ -148,12 +148,12 @@ S(XSCH - hw('sch')/4, YPE - 0.013, 'tool bindings', sz=7.3)
 # Right top: Workflow Config
 S(XSCH + hw('sch')/4, YPE + 0.035, 'Workflow Config', sz=8.5, c='#aad9aa')
 S(XSCH + hw('sch')/4, YPE + 0.021, 'total_timeout · logging_level', sz=7.3)
-S(XSCH + hw('sch')/4, YPE + 0.007, 'trace_enabled · dead_loop_detection', sz=7.3)
+S(XSCH + hw('sch')/4, YPE + 0.007, 'trace_enabled · max_loop_rounds · max_iterations', sz=7.3)
 # Right bottom: Node Config
 S(XSCH + hw('sch')/4, YPE - 0.010, 'Node Config', sz=8.5, c='#aad9aa')
 S(XSCH + hw('sch')/4, YPE - 0.023, 'LLM params · response format', sz=7.3)
 S(XSCH + hw('sch')/4, YPE - 0.035, 'agent rules · retries', sz=7.3)
-S(XSCH + hw('sch')/4, YPE - 0.047, 'termination_conditions · max_iterations', sz=7.3)
+S(XSCH + hw('sch')/4, YPE - 0.047, 'termination_conditions · tools', sz=7.3)
 S(XSCH + hw('sch')/4, YPE - 0.059, 'parallelism · model_selection', sz=7.3)
 
 # User Settings

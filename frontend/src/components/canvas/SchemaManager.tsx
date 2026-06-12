@@ -5,10 +5,18 @@
  * schemas. When a schema is loaded, shows editable workflow-level configuration
  * (timeout, logging, tracing, dead loop detection) and a Run button that
  * starts execution and navigates to the Runs tab.
+ *
+ * New Schema flow:
+ *   1. Click "New Schema" → setSchema with empty nodes/edges → canvas clears.
+ *   2. User edits canvas (adds nodes/edges) and config (name, desc, timeout…).
+ *   3. Click "Save" → toWorkflowSchema captures current store → persists.
+ *
+ * This is the same general path used when loading and re-saving an existing
+ * schema. No separate create form or create handler exists.
  */
 
 import { useState, useCallback } from "react";
-import { useWorkflowStore } from "../../store/workflowStore";
+import { useWorkflowStore, DEFAULT_WORKFLOW_CONFIG } from "../../store/workflowStore";
 import { schemasApi, runsApi } from "../../api/client";
 import { LoggingLevel } from "../../types/schema";
 
@@ -17,23 +25,21 @@ interface SchemaManagerProps {
 }
 
 export default function SchemaManager({ onRunStart }: SchemaManagerProps) {
-  const schemas = useWorkflowStore((storeState) => storeState.schemas);
-  const schemaId = useWorkflowStore((storeState) => storeState.schemaId);
-  const schemaName = useWorkflowStore((storeState) => storeState.schemaName);
-  const schemaDescription = useWorkflowStore((storeState) => storeState.schemaDescription);
-  const workflowConfig = useWorkflowStore((storeState) => storeState.workflowConfig);
-  const setSchema = useWorkflowStore((storeState) => storeState.setSchema);
-  const clearSchema = useWorkflowStore((storeState) => storeState.clearSchema);
-  const setSchemas = useWorkflowStore((storeState) => storeState.setSchemas);
-  const setSchemaName = useWorkflowStore((storeState) => storeState.setSchemaName);
-  const setSchemaDescription = useWorkflowStore((storeState) => storeState.setSchemaDescription);
-  const setWorkflowConfig = useWorkflowStore((storeState) => storeState.setWorkflowConfig);
-  const toWorkflowSchema = useWorkflowStore((storeState) => storeState.toWorkflowSchema);
+  const schemas = useWorkflowStore((s) => s.schemas);
+  const schemaId = useWorkflowStore((s) => s.schemaId);
+  const schemaName = useWorkflowStore((s) => s.schemaName);
+  const schemaDescription = useWorkflowStore((s) => s.schemaDescription);
+  const workflowConfig = useWorkflowStore((s) => s.workflowConfig);
+  const setSchema = useWorkflowStore((s) => s.setSchema);
+  const clearSchema = useWorkflowStore((s) => s.clearSchema);
+  const setSchemas = useWorkflowStore((s) => s.setSchemas);
+  const setSchemaName = useWorkflowStore((s) => s.setSchemaName);
+  const setSchemaDescription = useWorkflowStore((s) => s.setSchemaDescription);
+  const setWorkflowConfig = useWorkflowStore((s) => s.setWorkflowConfig);
+  const toWorkflowSchema = useWorkflowStore((s) => s.toWorkflowSchema);
 
-  const [createMode, setCreateMode] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [newDescription, setNewDescription] = useState("");
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [launching, setLaunching] = useState(false);
 
   const refreshSchemas = useCallback(async () => {
@@ -45,44 +51,44 @@ export default function SchemaManager({ onRunStart }: SchemaManagerProps) {
     async (targetSchemaId: string) => {
       const schema = await schemasApi.get(targetSchemaId);
       setSchema(schema);
+      setSaveError(null);
     },
     [setSchema]
   );
 
-  const handleCreate = useCallback(async () => {
-    if (!newName.trim()) return;
-    const schema = {
+  const handleNewSchema = useCallback(() => {
+    setSchema({
       schema_id: crypto.randomUUID(),
-      name: newName.trim(),
-      description: newDescription.trim(),
+      name: "Untitled",
+      description: "",
       nodes: [],
       edges: [],
-      config: {
-        total_timeout: 300,
-        logging_level: LoggingLevel.INFO,
-        trace_enabled: true,
-        dead_loop_detection: true,
-      },
-    };
-    const created = await schemasApi.create(schema);
-    setSchema(created);
-    await refreshSchemas();
-    setCreateMode(false);
-    setNewName("");
-    setNewDescription("");
-  }, [newName, newDescription, setSchema, refreshSchemas]);
+      config: { ...DEFAULT_WORKFLOW_CONFIG },
+    });
+    setSaveError(null);
+  }, [setSchema]);
 
   const handleSave = useCallback(async () => {
     if (!schemaId) return;
     setSaving(true);
+    setSaveError(null);
     try {
       const workflowSchema = toWorkflowSchema();
-      await schemasApi.update(schemaId, workflowSchema);
+      const isNew = !schemas.some((s) => s.schema_id === schemaId);
+      if (isNew) {
+        await schemasApi.create(workflowSchema);
+      } else {
+        await schemasApi.update(schemaId, workflowSchema);
+      }
       await refreshSchemas();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setSaveError(message);
+      throw err;
     } finally {
       setSaving(false);
     }
-  }, [schemaId, toWorkflowSchema, refreshSchemas]);
+  }, [schemaId, schemas, toWorkflowSchema, refreshSchemas]);
 
   const handleDelete = useCallback(
     async (targetSchemaId: string) => {
@@ -105,71 +111,68 @@ export default function SchemaManager({ onRunStart }: SchemaManagerProps) {
   }, [schemaId, onRunStart]);
 
   return (
-    <div className="panel">
+    <div className="panel schema-manager-panel">
       <div className="panel-header">Schemas</div>
       <div className="panel-body">
         <div className="btn-row mb-12">
-          <button className="btn btn-primary btn-sm" onClick={() => setCreateMode(!createMode)}>
-            {createMode ? "Cancel" : "New Schema"}
+          <button className="btn btn-primary btn-sm" onClick={handleNewSchema}>
+            New Schema
           </button>
-          {schemaId && (
-            <button className="btn btn-success btn-sm" onClick={handleSave} disabled={saving}>
-              {saving ? "Saving..." : "Save"}
-            </button>
-          )}
+          <button
+            className="btn btn-success btn-sm"
+            onClick={handleSave}
+            disabled={saving || !schemaId}
+          >
+            {saving ? "Saving..." : "Save"}
+          </button>
         </div>
 
-        {createMode && (
-          <div className="mb-12">
-            <div className="form-group">
-              <label className="form-label">Name</label>
-              <input
-                className="form-input"
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                placeholder="Workflow name"
-              />
-            </div>
-            <div className="form-group">
-              <label className="form-label">Description</label>
-              <textarea
-                className="form-textarea"
-                value={newDescription}
-                onChange={(e) => setNewDescription(e.target.value)}
-                placeholder="What does this workflow do?"
-              />
-            </div>
-            <button className="btn btn-primary btn-sm" onClick={handleCreate}>
-              Create
-            </button>
-          </div>
+        {saveError && (
+          <div className="save-error-banner">{saveError}</div>
         )}
 
-        {schemas.length === 0 && !createMode && (
-          <div className="empty-state">No schemas yet. Create one to begin.</div>
-        )}
+        <div className="schema-list-scroll">
+          {schemas.length === 0 && (
+            <div className="empty-state">No schemas yet. Create one to begin.</div>
+          )}
 
-        {schemas.map((schema) => (
-          <div
-            key={schema.schema_id}
-            className={`schema-list-item ${schemaId === schema.schema_id ? "active" : ""}`}
-            onClick={() => handleLoad(schema.schema_id)}
-          >
-            <div className="schema-list-item-name">{schema.name}</div>
-            <div className="schema-list-item-desc">{schema.description}</div>
-            {schemaId === schema.schema_id && (
-              <button
-                className="btn btn-danger btn-sm mt-8"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleDelete(schema.schema_id);
-                }}
-              >
-                Delete
-              </button>
-            )}
-          </div>
-        ))}
+          {schemas.map((schema) => (
+            <div
+              key={schema.schema_id}
+              className={`schema-list-item ${schemaId === schema.schema_id ? "active" : ""}`}
+              onClick={() => handleLoad(schema.schema_id)}
+            >
+              <div className="schema-list-item-row">
+                <div className="schema-list-item-name">{schema.name}</div>
+                {schemaId === schema.schema_id && (
+                  <button
+                    className="btn btn-danger btn-xs"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDelete(schema.schema_id);
+                    }}
+                  >
+                    Delete
+                  </button>
+                )}
+              </div>
+              <div className="schema-list-item-desc">{schema.description}</div>
+              {schemaId === schema.schema_id && (
+                <button
+                  className="btn btn-run btn-sm mt-8"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleRun();
+                  }}
+                  disabled={launching}
+                  style={{ width: "100%" }}
+                >
+                  {launching ? "Launching..." : "Run Workflow"}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
 
         {schemaId && (
           <>
@@ -241,27 +244,44 @@ export default function SchemaManager({ onRunStart }: SchemaManagerProps) {
             </div>
 
             <div className="form-group">
-              <label className="form-checkbox">
-                <input
-                  type="checkbox"
-                  checked={workflowConfig.dead_loop_detection}
-                  onChange={(e) =>
-                    setWorkflowConfig({ dead_loop_detection: e.target.checked })
-                  }
-                />
-                Dead Loop Detection
-              </label>
+              <label className="form-label">Max Iterations</label>
+              <input
+                type="number"
+                className="form-input"
+                min={1}
+                value={workflowConfig.max_iterations}
+                onChange={(e) =>
+                  setWorkflowConfig({ max_iterations: Math.max(1, parseInt(e.target.value) || 1) })
+                }
+              />
             </div>
 
-            <hr className="divider" />
-            <button
-              className="btn btn-run"
-              onClick={handleRun}
-              disabled={launching}
-              style={{ width: "100%" }}
-            >
-              {launching ? "Launching..." : "Run Workflow"}
-            </button>
+            <div className="form-group">
+              <label className="form-label">Iteration Sleep (seconds)</label>
+              <input
+                type="number"
+                className="form-input"
+                min={0}
+                step={0.1}
+                value={workflowConfig.iteration_sleep}
+                onChange={(e) =>
+                  setWorkflowConfig({ iteration_sleep: Math.max(0, parseFloat(e.target.value) || 0) })
+                }
+              />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Max Loop Rounds</label>
+              <input
+                type="number"
+                className="form-input"
+                min={1}
+                value={workflowConfig.max_loop_rounds}
+                onChange={(e) =>
+                  setWorkflowConfig({ max_loop_rounds: Math.max(1, parseInt(e.target.value) || 1) })
+                }
+              />
+            </div>
           </>
         )}
       </div>

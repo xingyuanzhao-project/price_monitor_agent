@@ -88,10 +88,11 @@ class BaseTool(ABC):
 
     def __init__(self) -> None:
         """
-        Initialize the base tool with empty credentials.
+        Initialize the base tool with empty credentials and no event callback.
 
         Description:
-            Sets up the internal credentials dictionary as empty.
+            Sets up the internal credentials dictionary as empty and the
+            event callback as None.
 
         Params:
             None
@@ -100,6 +101,7 @@ class BaseTool(ABC):
             None
         """
         self._credentials: dict[str, Any] = {}
+        self._event_callback: Any | None = None
 
     @property
     @abstractmethod
@@ -187,6 +189,27 @@ class BaseTool(ABC):
             None
         """
         self._credentials = credentials
+
+    def inject_event_callback(self, callback: Any) -> None:
+        """Inject the event callback for use during execution.
+
+        Follows the same injection pattern as inject_credentials.
+        The tool can emit trace events via emit_event() during execute().
+        """
+        self._event_callback = callback
+
+    async def emit_event(self, event: dict[str, Any]) -> None:
+        """Emit a trace event via the injected callback.
+
+        No-op if no callback was injected. Handles both sync and async
+        callbacks, same as the harness's _emit_tool_event.
+        """
+        if self._event_callback is None:
+            return
+        import asyncio
+        result = self._event_callback(event)
+        if asyncio.iscoroutine(result):
+            await result
 
     def parse_request(self, text: str) -> dict | None:
         """Parse a natural language request into canonical tool arguments.

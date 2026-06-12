@@ -320,6 +320,7 @@ def _normalise_event(
         "node_started": "node_start",
         "node_completed": "node_complete",
         "node_error": "node_error",
+        "node_input": "node_input",
         "node_output": "node_output",
         "tool_call": "tool_call",
         "tool_result": "tool_result",

@@ -74,6 +74,7 @@ async def list_schemas() -> list[dict]:
 
 
 @router.post("/", status_code=201)
+@router.post("", status_code=201)
 async def create_schema(schema: WorkflowSchema) -> WorkflowSchema:
     """Create (or overwrite) a workflow schema.
 

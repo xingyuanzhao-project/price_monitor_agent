@@ -77,15 +77,17 @@ class LoggingLevel(str, Enum):
 
     Attributes:
         NONE: No logging output.
-        ERRORS: Only error-level messages.
-        INFO: Informational messages and above.
+        ALL: Everything — all events regardless of trace_enabled.
+        INFO: Informational messages and above (respects trace_enabled).
         CRITICAL_INFO: Only critical informational messages.
+        ERRORS: Only error-level messages.
     """
 
     NONE = "none"
-    ERRORS = "errors"
+    ALL = "all"
     INFO = "info"
     CRITICAL_INFO = "critical_info"
+    ERRORS = "errors"
 
 
 class GroupStructure(str, Enum):
@@ -114,19 +116,27 @@ class WorkflowConfig(BaseModel):
 
     Description:
         Holds top-level settings that apply to the entire workflow run,
-        including timeout, logging, tracing, and loop detection.
+        including timeout, logging, tracing, and the loop-round bound.
 
     Attributes:
         total_timeout: Maximum seconds before workflow times out.
         logging_level: Verbosity level for execution logs.
         trace_enabled: Whether to emit execution trace events.
-        dead_loop_detection: Whether to detect and halt infinite loops.
+        max_loop_rounds: How many rounds each explicit graph loop
+            (self-loop edge or multi-node cycle) executes before moving on.
+        max_iterations: Ceiling on the agentic loop inside a single agent
+            execution (LLM turn → tool round-trip → LLM turn). Owned by the
+            workflow and threaded through orchestration, not per node.
+        iteration_sleep: Seconds to sleep between agentic iterations,
+            applied uniformly across the workflow.
     """
 
     total_timeout: int = Field(default=300, description="Maximum execution time in seconds")
     logging_level: LoggingLevel = Field(default=LoggingLevel.INFO, description="Logging verbosity level")
     trace_enabled: bool = Field(default=True, description="Whether execution tracing is active")
-    dead_loop_detection: bool = Field(default=True, description="Whether to detect infinite loops")
+    max_loop_rounds: int = Field(default=3, ge=1, description="Rounds each explicit graph loop executes")
+    max_iterations: int = Field(default=10, ge=1, description="Max agentic iterations per agent execution")
+    iteration_sleep: float = Field(default=0, ge=0, description="Seconds to sleep between agentic iterations")
 
 
 class NodeConfig(BaseModel):
@@ -145,8 +155,11 @@ class NodeConfig(BaseModel):
         instruction: User-created instruction prompts for the agent.
         retries: Number of retry attempts on failure.
         retry_waiting_time: Base seconds for exponential backoff between retries.
-        termination_conditions: List of conditions that end the agentic loop.
-        max_iterations: Maximum iterations in the agentic loop.
+        termination_conditions: Declarative completion criteria for this
+            agent. Each is matched against the agent's accumulated output;
+            when all are present the agentic loop terminates (the third
+            completion layer alongside the mechanical check and the agent's
+            own judgement). Loop bound and sleep are workflow-level.
         token_budget: Maximum token budget for assembled context.
         scope_window: Number of few-shot examples to retain.
         tools: List of tool names authorized for this node.
@@ -163,15 +176,19 @@ class NodeConfig(BaseModel):
     instruction: list[str] = Field(default_factory=list, description="User-created instruction prompts for the agent")
     retries: int = Field(default=2, description="Number of retry attempts")
     retry_waiting_time: float = Field(default=1.5, description="Base seconds for exponential backoff between retries")
-    termination_conditions: list[str] = Field(default_factory=list, description="Conditions to end the loop")
-    max_iterations: int = Field(default=10, description="Maximum agentic loop iterations")
-    iteration_sleep: float = Field(default=0, description="Seconds to sleep between iterations")
+    termination_conditions: list[str] = Field(default_factory=list, description="Declarative completion criteria")
     token_budget: int = Field(default=32768, description="Maximum token budget for context assembly")
     scope_window: int = Field(default=5, description="Number of few-shot examples to retain")
     tools: list[str] = Field(default_factory=list, description="Authorized tool names for this node")
+    tool_strict: bool = Field(default=True, description="Enforce strict schema conformance on tool call arguments")
+    tool_choice: str = Field(default="auto", description="Tool calling mode: auto, required, or none")
+    parallel_tool_calls: bool = Field(default=True, description="Whether the LLM may call multiple tools in one turn")
     call_budget: int = Field(default=50, description="Maximum tool calls per execution")
     rate_limit_per_minute: int = Field(default=30, description="Tool calls per 60-second window")
     few_shot_examples: list[dict[str, str]] = Field(default_factory=list, description="In-context learning examples")
+    read_upstream_state: bool = Field(default=True, description="Whether this node can read upstream nodes' state")
+    expose_downstream_state: bool = Field(default=True, description="Whether this node's state is visible to downstream nodes")
+    read_orchestration_state: bool = Field(default=False, description="Whether this node can read the full orchestration state (all nodes)")
 
 
 class AgentGroupConfig(BaseModel):
@@ -187,8 +204,10 @@ class AgentGroupConfig(BaseModel):
         min_agents: Minimum number of sub-agents required.
         max_agents: Maximum number of sub-agents allowed.
         group_structure: Execution structure for orchestrating sub-agents.
-        shared_state: Dictionary of state shared across sub-agents.
+        shared_context: Initial context dictionary shared across sub-agents.
         tool_authorization: List of tool names the group is authorized to use.
+        sub_agent_read_group_state: Whether sub-agents can read
+            the group state (sibling statuses and shared context).
 
     Methods:
         validate_agent_bounds: Ensures max_agents >= min_agents.
@@ -198,8 +217,9 @@ class AgentGroupConfig(BaseModel):
     min_agents: int = Field(default=2, description="Minimum sub-agent count")
     max_agents: int = Field(default=10, description="Maximum sub-agent count")
     group_structure: GroupStructure = Field(default=GroupStructure.DEFAULT, description="Execution structure")
-    shared_state: dict = Field(default_factory=dict, description="Shared state dictionary")
+    shared_context: dict = Field(default_factory=dict, description="Initial context shared across sub-agents")
     tool_authorization: list[str] = Field(default_factory=list, description="Authorized tool names")
+    sub_agent_read_group_state: bool = Field(default=True, description="Whether sub-agents can read the group state")
 
     @model_validator(mode="after")
     def validate_agent_bounds(self) -> "AgentGroupConfig":

@@ -1,0 +1,10 @@
+schema_id: a412e542-b0d3-485c-9c7d-74252b6590bc
+name: test2
+description: ''
+nodes: []
+edges: []
+config:
+  total_timeout: 300
+  logging_level: info
+  trace_enabled: true
+  max_loop_rounds: 3

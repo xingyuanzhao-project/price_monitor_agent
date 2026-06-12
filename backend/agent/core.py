@@ -24,6 +24,7 @@ from typing import Any, Callable, Optional
 
 from backend.agent.llm_provider import LLMProvider, LLMProviderError
 from backend.schema.models import NodeConfig
+from backend.state import NodeState
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,9 +72,26 @@ class CoreAgent:
     Description:
         Repeatedly calls the LLM, processes any tool_calls by dispatching
         them to the tool_call_handler, appends results to the conversation,
-        and loops until a termination condition is met, max_iterations is
-        reached, or the LLM produces a final text response without tool_calls.
-        Includes retry with exponential backoff and optional fallback model.
+        and loops until completion is decided or the iteration budget is
+        spent. The loop bound (``max_iterations``) and inter-iteration
+        sleep are not owned by the agent — they are supplied by the
+        orchestration layer from the workflow config, so the loop is
+        explicit at the graph→schema→orchestration level rather than
+        hardwired per node. Includes retry with exponential backoff.
+
+    Task completion is decided by three layers, evaluated each iteration:
+        1. Mechanical (NodeState.check_completion) — did the tool layer
+           return non-empty, non-error data? Advisory: it informs the
+           agent (via injected status) but does not by itself stop the
+           loop, so multi-step tool workflows are not cut short.
+        2. Agent judgement — the LLM produces a final text response with
+           no tool calls. The model asserts the task is done.
+        3. Declarative (NodeState.evaluate_termination_conditions) — the
+           node's user-authored termination_conditions are matched against
+           the accumulated output; when all are met the loop terminates
+           even if the agent would otherwise continue.
+    The iteration budget is the hard ceiling: exhausting it without a
+    completion verdict raises AgentExecutionError.
 
     Attributes:
         node_id: Unique identifier for this agent instance.
@@ -81,7 +99,9 @@ class CoreAgent:
         config: NodeConfig with model, retry, and termination settings.
         llm_provider: LLMProvider instance for API calls.
         tool_call_handler: Async callable that executes a tool call and returns result.
-        stream_callback: Optional async callable receiving streaming chunks.
+        emit_event: Optional async-compatible callback receiving event dicts.
+            Used for ALL trace events from the agent layer.
+        state: Optional NodeState for centralized state tracking.
 
     Methods:
         execute: Run the agentic loop and return the final result.
@@ -94,7 +114,8 @@ class CoreAgent:
         config: NodeConfig,
         llm_provider: LLMProvider,
         tool_call_handler: Callable,
-        stream_callback: Optional[Callable] = None,
+        emit_event: Optional[Callable] = None,
+        node_state: Optional[NodeState] = None,
     ) -> None:
         """
         Initialize the CoreAgent with its configuration and dependencies.
@@ -108,9 +129,13 @@ class CoreAgent:
             config (NodeConfig): Agent configuration from the workflow schema.
             llm_provider (LLMProvider): Provider for LLM API calls.
             tool_call_handler (Callable): Async function to execute tool calls.
-                Signature: async (tool_name: str, tool_args: dict) -> Any
-            stream_callback (Optional[Callable]): Optional async callback for streaming.
-                Signature: async (chunk: dict) -> None
+                Signature: async (assistant_message: dict) -> list[dict]
+            emit_event (Optional[Callable]): Optional async-compatible callback
+                receiving event dicts for tracing.
+                Signature: async (event: dict) -> None
+            node_state (Optional[NodeState]): Mutable state object for this
+                node.  If provided, the agent writes conversation history,
+                tool call records, and iteration progress to it.
 
         Returns:
             None
@@ -120,24 +145,110 @@ class CoreAgent:
         self.config = config
         self.llm_provider = llm_provider
         self.tool_call_handler = tool_call_handler
-        self.stream_callback = stream_callback
+        self._emit_event = emit_event
+        self.state = node_state
 
-    async def execute(self, messages: list[dict], tools: Optional[list[dict]] = None) -> dict:
+    async def _emit(self, event: dict[str, Any]) -> None:
+        """Emit a trace event through the injected callback.
+
+        All agent-layer events flow through this single method.
+
+        Args:
+            event: Event dict. ``node_id`` is injected automatically.
+        """
+        if self._emit_event is None:
+            return
+        event["node_id"] = self.node_id
+        result = self._emit_event(event)
+        if asyncio.iscoroutine(result):
+            await result
+
+    async def _transition_state(
+        self, action: str, summary: str, *, reason: str = "",
+    ) -> None:
+        """Transition node state and emit a traced state_change event.
+
+        Reads the current status from ``self.state`` before mutating, so
+        the trace shows the actual old value rather than a hardwired
+        assumption.
+
+        Args:
+            action: ``"complete"`` or ``"fail"``.
+            summary: Text passed to ``state.complete()`` or ``state.fail()``.
+            reason: Optional reason string for the trace event.
+        """
+        if self.state is None:
+            return
+        old_status = self.state.status.value
+        if action == "complete":
+            self.state.complete(summary=summary)
+        else:
+            self.state.fail(error=summary)
+        event: dict[str, Any] = {
+            "type": "state_change",
+            "field": "status",
+            "old_value": old_status,
+            "new_value": self.state.status.value,
+        }
+        if reason:
+            event["reason"] = reason
+        await self._emit(event)
+
+    async def execute(
+        self,
+        messages: list[dict],
+        tools: Optional[list[dict]] = None,
+        *,
+        max_iterations: int,
+        iteration_sleep: float,
+    ) -> dict:
         """Run the agentic execution loop.
 
         Calls the LLM iteratively. Hands the full assistant_message to the
         execution harness (via tool_call_handler) which produces the ToolRequest
         structure and dispatches to tools. The harness handles both native
         tool_calls and non-native text requests.
+
+        The loop is bounded and paced by orchestration, not by the agent:
+
+        Args:
+            messages: Initial conversation messages.
+            tools: Tool definitions available to the LLM, or None.
+            max_iterations: Iteration ceiling, from the workflow config.
+            iteration_sleep: Seconds to sleep between iterations, from the
+                workflow config.
+
+        Completion follows the three layers documented on the class.
+        Traces every significant transition via ``_emit``.
         """
-        conversation_messages = list(messages)
-        tool_calls_record: list[dict] = []
+        if self.state is not None:
+            self.state.conversation_history = list(messages)
+            conversation_messages = self.state.conversation_history
+            tool_calls_record = self.state.tool_calls_record
+        else:
+            conversation_messages = list(messages)
+            tool_calls_record = []
+
+        # Accumulated agent output + tool results, matched by the
+        # declarative termination layer.
+        completion_text_parts: list[str] = []
         iterations_completed = 0
 
-        for iteration_index in range(self.config.max_iterations):
+        for iteration_index in range(max_iterations):
             iterations_completed = iteration_index + 1
+            if self.state is not None:
+                self.state.iteration = iterations_completed
+
             _LOGGER.info("[%s] Iteration %d/%d — calling LLM",
-                         self.node_id, iterations_completed, self.config.max_iterations)
+                         self.node_id, iterations_completed, max_iterations)
+
+            await self._emit({
+                "type": "iteration_started",
+                "iteration": iterations_completed,
+                "max_iterations": max_iterations,
+                "message_count": len(conversation_messages),
+                "task_status": self.state.status.value if self.state else "unknown",
+            })
 
             llm_response = await self._call_llm_with_retries(
                 self.llm_provider, conversation_messages, tools
@@ -145,6 +256,10 @@ class CoreAgent:
 
             if llm_response is None:
                 _LOGGER.error("[%s] All LLM retries exhausted", self.node_id)
+                await self._transition_state(
+                    "fail", "All LLM call attempts failed (retries exhausted)",
+                    reason="llm_retries_exhausted",
+                )
                 raise AgentExecutionError(
                     "All LLM call attempts failed (retries exhausted)",
                     node_id=self.node_id,
@@ -156,74 +271,130 @@ class CoreAgent:
             finish_reason = choice.get("finish_reason", "stop")
 
             conversation_messages.append(assistant_message)
+            if assistant_message.get("content"):
+                completion_text_parts.append(assistant_message["content"])
 
-            if self.stream_callback is not None:
-                stream_result = self.stream_callback({
-                    "node_id": self.node_id,
-                    "iteration": iteration_index,
-                    "content": assistant_message.get("content", ""),
-                    "finish_reason": finish_reason,
-                    "has_tool_calls": bool(assistant_message.get("tool_calls")),
-                })
-                if asyncio.iscoroutine(stream_result):
-                    await stream_result
-
-            # --- Hand full assistant_message to execution harness ---
-            # The harness produces {native_tool_request, non_native_tool_request}
-            # and dispatches to the tool support layer.
             has_native_tool_calls = bool(assistant_message.get("tool_calls"))
 
-            if has_native_tool_calls:
-                # Native path: LLM produced structured tool_calls
-                _LOGGER.info("[%s] Native tool calls detected", self.node_id)
-                result_messages = await self.tool_call_handler(assistant_message)
-                conversation_messages.extend(result_messages)
-
-                for msg in result_messages:
-                    tool_calls_record.append({"type": "native", "result": msg.get("content", "")})
-
-                if self._check_termination_conditions(assistant_message, tool_calls_record):
-                    return {
-                        "content": assistant_message.get("content", ""),
-                        "iterations": iterations_completed,
-                        "tool_calls_made": tool_calls_record,
-                        "finish_reason": "termination_condition",
-                    }
-                if self.config.iteration_sleep > 0:
-                    await asyncio.sleep(self.config.iteration_sleep)
-                continue
-
-            elif tools and assistant_message.get("content"):
-                # Non-native path: LLM produced text, tools are available.
-                # Pass to harness — tool layer tries parse_request.
-                result_messages = await self.tool_call_handler(assistant_message)
-                if result_messages:
-                    _LOGGER.info("[%s] Non-native tool match found", self.node_id)
-                    conversation_messages.extend(result_messages)
-
-                    for msg in result_messages:
-                        tool_calls_record.append({"type": "non_native", "result": msg.get("content", "")})
-
-                    if self.config.iteration_sleep > 0:
-                        await asyncio.sleep(self.config.iteration_sleep)
-                    continue
-                # No tool matched — fall through to treat as final answer
-
-            content = assistant_message.get("content", "")
-            _LOGGER.info("[%s] Agent finished — reason=%s, iterations=%d, content_length=%d",
-                         self.node_id, finish_reason, iterations_completed, len(content))
-            return {
-                "content": content,
-                "iterations": iterations_completed,
-                "tool_calls_made": tool_calls_record,
+            await self._emit({
+                "type": "llm_response",
+                "iteration": iterations_completed,
                 "finish_reason": finish_reason,
-            }
+                "has_tool_calls": has_native_tool_calls,
+                "content_length": len(assistant_message.get("content") or ""),
+            })
 
+            # --- Tool call path (native or non-native) ---
+            result_messages = await self._process_tool_calls(
+                assistant_message, has_native_tool_calls, tools,
+                conversation_messages, tool_calls_record, iterations_completed,
+            )
+
+            # --- Layer 2: agent judgement — no tool calls means done ---
+            if result_messages is None:
+                content = assistant_message.get("content", "")
+                return await self._finish(
+                    content, iterations_completed, finish_reason,
+                    tool_calls_record, has_tool_calls=False,
+                )
+
+            # Tools ran this iteration. Fold their results into the text the
+            # declarative layer matches against.
+            for msg in result_messages:
+                if msg.get("content"):
+                    completion_text_parts.append(str(msg["content"]))
+            accumulated_output = "\n".join(completion_text_parts)
+
+            # --- Layer 1: mechanical verdict (advisory) ---
+            verdict = self.state.check_completion(result_messages)
+            # --- Layer 3: declarative termination conditions ---
+            termination = self.state.evaluate_termination_conditions(
+                self.config.termination_conditions, accumulated_output,
+            )
+            await self._emit({
+                "type": "completion_check",
+                "iteration": iterations_completed,
+                "verdict": verdict,
+                "termination": termination,
+            })
+            self._inject_status_context(
+                conversation_messages, verdict, termination, iterations_completed,
+                max_iterations,
+            )
+
+            if termination["active"] and termination["satisfied"]:
+                content = assistant_message.get("content") or _synthesize_content(result_messages)
+                return await self._finish(
+                    content, iterations_completed, finish_reason,
+                    tool_calls_record, has_tool_calls=True,
+                    reason="termination_conditions_met",
+                )
+
+            await self._emit({
+                "type": "node_output",
+                "chunk": {
+                    "iteration": iterations_completed,
+                    "content": assistant_message.get("content"),
+                    "finish_reason": finish_reason,
+                    "has_tool_calls": True,
+                },
+            })
+
+            if iteration_sleep > 0:
+                await asyncio.sleep(iteration_sleep)
+
+        await self._transition_state(
+            "fail", f"Maximum iterations ({max_iterations}) reached",
+            reason="max_iterations_reached",
+        )
         raise AgentExecutionError(
-            f"Maximum iterations ({self.config.max_iterations}) reached without termination",
+            f"Maximum iterations ({max_iterations}) reached without termination",
             node_id=self.node_id,
             iterations_completed=iterations_completed,
         )
+
+    async def _finish(
+        self,
+        content: str,
+        iterations_completed: int,
+        finish_reason: str,
+        tool_calls_record: list[dict],
+        *,
+        has_tool_calls: bool,
+        reason: str = "",
+    ) -> dict:
+        """Complete the node, emit the final node_output, and build the result.
+
+        Single return point for both completion layers (agent judgement
+        and declarative termination), so the completion side effects are
+        not duplicated.
+
+        Args:
+            content: Final agent output text.
+            iterations_completed: Iterations run.
+            finish_reason: LLM finish reason of the final response.
+            tool_calls_record: Accumulated tool-call log.
+            has_tool_calls: Whether the final iteration made tool calls.
+            reason: Optional state-change reason for the trace.
+        """
+        await self._transition_state("complete", content[:500], reason=reason)
+        _LOGGER.info("[%s] Agent finished — reason=%s, iterations=%d, content_length=%d",
+                     self.node_id, reason or finish_reason, iterations_completed, len(content))
+        await self._emit({
+            "type": "node_output",
+            "chunk": {
+                "iteration": iterations_completed,
+                "content": content,
+                "finish_reason": finish_reason,
+                "has_tool_calls": has_tool_calls,
+            },
+        })
+        return {
+            "content": content,
+            "iterations": iterations_completed,
+            "tool_calls_made": tool_calls_record,
+            "finish_reason": finish_reason,
+        }
 
     async def _call_llm_with_retries(
         self,
@@ -231,30 +402,34 @@ class CoreAgent:
         messages: list[dict],
         tools: Optional[list[dict]],
     ) -> Optional[dict]:
-        """
-        Call the LLM with exponential backoff retries.
+        """Call the LLM with exponential backoff retries.
 
-        Description:
-            Attempts the LLM call up to (config.retries + 1) times, waiting
-            with exponential backoff between attempts. Returns None if all
-            attempts fail.
+        Attempts the LLM call up to ``config.retries + 1`` times, with
+        exponential backoff between attempts.  Each retry is traced so the
+        event log shows every attempt.
 
-        Params:
-            provider (LLMProvider): The LLM provider to call.
-            messages (list[dict]): Conversation messages.
-            tools (Optional[list[dict]]): Tool definitions.
+        Args:
+            provider: The LLM provider to call.
+            messages: Conversation messages.
+            tools: Tool definitions.
 
         Returns:
-            Optional[dict]: The LLM response dict, or None if all attempts failed.
+            The LLM response dict, or None if all attempts failed.
         """
         last_error: Optional[LLMProviderError] = None
 
-        for attempt_index in range(self.config.retries + 1):
+        tc = self.config.tool_choice if tools else None
+        ptc = self.config.parallel_tool_calls if tools else None
+        max_attempts = self.config.retries + 1
+
+        for attempt_index in range(max_attempts):
             try:
                 response = await provider.complete(
                     messages=messages,
                     tools=tools,
                     response_format=self.config.response_format,
+                    tool_choice=tc,
+                    parallel_tool_calls=ptc,
                 )
                 return response
             except LLMProviderError as provider_error:
@@ -263,37 +438,159 @@ class CoreAgent:
                     backoff_seconds = self.config.retry_waiting_time ** attempt_index
                     _LOGGER.warning("[%s] LLM call failed (attempt %d/%d): %s — retrying in %.1fs",
                                     self.node_id, attempt_index + 1,
-                                    self.config.retries + 1, provider_error,
+                                    max_attempts, provider_error,
                                     backoff_seconds)
+                    await self._emit({
+                        "type": "llm_retry",
+                        "attempt": attempt_index + 1,
+                        "max_attempts": max_attempts,
+                        "error": str(provider_error),
+                        "backoff_seconds": backoff_seconds,
+                    })
                     await asyncio.sleep(backoff_seconds)
 
         _ = last_error
         return None
 
-    def _check_termination_conditions(
-        self, assistant_message: dict, tool_calls_record: list[dict]
-    ) -> bool:
-        """
-        Check if any configured termination conditions are met.
+    async def _process_tool_calls(
+        self,
+        assistant_message: dict,
+        has_native_tool_calls: bool,
+        tools: Optional[list[dict]],
+        conversation_messages: list[dict],
+        tool_calls_record: list[dict],
+        iteration: int,
+    ) -> Optional[list[dict]]:
+        """Dispatch tool calls (native or non-native) and append results.
 
-        Description:
-            Evaluates the termination_conditions from config against the
-            current state of the conversation and tool call history.
+        Returns the result messages if tool calls were processed, or None
+        if no tool calls were made.
 
-        Params:
-            assistant_message (dict): The latest assistant message.
-            tool_calls_record (list[dict]): All tool calls made so far.
+        Args:
+            assistant_message: The LLM response message.
+            has_native_tool_calls: Whether the message contains tool_calls.
+            tools: Tool definitions (None if no tools available).
+            conversation_messages: The live conversation list (mutated).
+            tool_calls_record: Accumulated tool call log (mutated).
+            iteration: Current iteration number for tracing.
 
         Returns:
-            bool: True if a termination condition is satisfied.
+            List of tool result messages, or None if no tool calls occurred.
         """
-        if not self.config.termination_conditions:
-            return False
+        if has_native_tool_calls:
+            call_type = "native"
+        elif tools and assistant_message.get("content"):
+            call_type = "non_native"
+        else:
+            return None
 
-        content = assistant_message.get("content", "") or ""
-        for condition in self.config.termination_conditions:
-            if condition in content:
-                return True
+        result_messages = await self.tool_call_handler(assistant_message)
 
-        return False
+        if call_type == "non_native" and not result_messages:
+            return None
+
+        conversation_messages.extend(result_messages)
+
+        await self._emit({
+            "type": "tool_results_appended",
+            "iteration": iteration,
+            "call_type": call_type,
+            "result_count": len(result_messages),
+            "results_preview": [
+                {
+                    "role": msg.get("role"),
+                    "tool_call_id": msg.get("tool_call_id", ""),
+                    "content_length": len(msg.get("content", "")),
+                    "content_preview": msg.get("content", "")[:500],
+                }
+                for msg in result_messages
+            ],
+        })
+
+        for msg in result_messages:
+            tool_calls_record.append({
+                "type": call_type,
+                "result": msg.get("content", ""),
+            })
+
+        return result_messages
+
+    def _inject_status_context(
+        self,
+        conversation_messages: list[dict],
+        verdict: dict[str, Any],
+        termination: dict[str, Any],
+        iteration: int,
+        max_iterations: int,
+    ) -> None:
+        """Inject task status, mechanical verdict, and explicit done-criteria.
+
+        Appended as a system-role message so the LLM (layer 2) can see
+        where the task stands, what the mechanical check found, and which
+        declared termination conditions remain unmet — and decide whether
+        to continue or produce a final answer.
+
+        Args:
+            conversation_messages: The live conversation list (mutated).
+            verdict: The mechanical completion verdict (layer 1).
+            termination: The declarative termination verdict (layer 3).
+            iteration: Current iteration number.
+            max_iterations: Iteration ceiling from the workflow config.
+        """
+        status_text = (
+            f"[Task status — iteration {iteration}/{max_iterations}]\n"
+            f"Task: {self.label}\n"
+            f"Completion check: successful_results={verdict['successful_count']}, "
+            f"failed={verdict['failed_count']}, "
+            f"total_tool_calls={verdict['total_tool_calls']}\n"
+        )
+        if termination["active"]:
+            if termination["unmet"]:
+                status_text += (
+                    "Termination conditions not yet met: "
+                    f"{termination['unmet']}. Continue until they are satisfied.\n"
+                )
+            else:
+                status_text += "All termination conditions met.\n"
+        if self.state is not None:
+            status_text += f"Status: {self.state.status.value}\n"
+
+        if verdict["has_successful_result"]:
+            status_text += (
+                "Tool calls returned data successfully. "
+                "If the task objective is met, produce a final text response. "
+                "If more data is needed, continue with additional tool calls."
+            )
+        else:
+            status_text += (
+                "No successful tool results yet. "
+                "Review the errors and adjust your approach."
+            )
+
+        conversation_messages.append({
+            "role": "system",
+            "content": status_text,
+        })
+
+
+def _synthesize_content(result_messages: list[dict]) -> str:
+    """Build a final content string from tool results when the LLM
+    produced no text alongside its tool calls.
+
+    Only includes messages with substantive content (length > 2).
+    By the time results reach the agent, they have already survived
+    the execution harness without exception, so all are valid results.
+
+    Args:
+        result_messages: Tool result messages from the final iteration.
+
+    Returns:
+        Concatenated tool result content.
+    """
+    parts = []
+    for msg in result_messages:
+        content = msg.get("content", "")
+        if len(content) > 2:
+            parts.append(content)
+    return "\n".join(parts)
 

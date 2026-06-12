@@ -9,7 +9,8 @@ What it does:
 Entities in it:
     - base: Abstract BaseTool class and ToolExecutionError exception.
     - registry: ToolRegistry for registering, retrieving, and listing tools.
-    - data_acquisition: FetchDataTool for retrieving market, news, social, and macro data.
+    - data_acquisition: FetchExchangeDataTool, FetchMacroDataTool,
+      FetchNewsDataTool, FetchSocialMediaDataTool for domain-specific data retrieval.
     - financial_analysis: TechnicalAnalysisTool, QuantitativeAnalysisTool,
       SignalAnalysisTool, DiagnosticAnalysisTool.
     - backtest: DetectRegimeTool, EstimateParametersTool, SimulateProcessTool,

@@ -8,5 +8,36 @@
       "available_models": []
     }
   ],
-  "global_defaults": {}
+  "global_defaults": {},
+  "enabled_public_sources": [
+    "fred",
+    "ecb",
+    "okx",
+    "binance",
+    "coingecko",
+    "guardian",
+    "hackernews",
+    "mastodon",
+    "yahoo",
+    "frankfurter",
+    "worldbank",
+    "imf",
+    "gdelt",
+    "isw",
+    "oksurf",
+    "wikievents",
+    "thehear",
+    "github",
+    "lemmy",
+    "polymarket",
+    "predscope",
+    "openmeteo",
+    "bis",
+    "usaspending",
+    "comtrade",
+    "usgs",
+    "gdacs",
+    "eonet"
+  ],
+  "additional_tool_apis": []
 }

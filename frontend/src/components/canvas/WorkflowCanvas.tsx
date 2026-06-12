@@ -4,6 +4,11 @@
  * Renders custom agent nodes and typed edges. Provides a toolbar to add
  * new nodes (agent, agent_group, tool). Handles node selection, edge
  * connections, and position changes.
+ *
+ * Edge direction and type are structural: a connection is only valid
+ * from an output port to a matching input port, and the edge type is
+ * read from the ports involved (EDGE_TYPE_PORTS) — never guessed from
+ * node types.
  */
 
 import { useCallback, useMemo } from "react";
@@ -12,10 +17,10 @@ import {
   Background,
   Controls,
   MiniMap,
-  addEdge,
   type OnConnect,
   type OnNodesChange,
   type OnEdgesChange,
+  type IsValidConnection,
   applyNodeChanges,
   applyEdgeChanges,
   type Node,
@@ -23,9 +28,28 @@ import {
 import "@xyflow/react/dist/style.css";
 
 import AgentNode from "./AgentNode";
-import { useWorkflowStore } from "../../store/workflowStore";
+import { DataFlowEdge, ToolCallEdge } from "./edges";
+import { useWorkflowStore, EDGE_TYPE_PORTS } from "../../store/workflowStore";
 import { NodeType, EdgeType, GroupStructure } from "../../types/schema";
 import type { NodeConfig } from "../../types/schema";
+
+/**
+ * Resolve the edge type declared by a pair of ports, or null when the
+ * ports do not form a valid connection. Synchronization edges share the
+ * data ports but are not drawable, so they are skipped.
+ */
+function edgeTypeForPorts(
+  sourceHandle: string | null | undefined,
+  targetHandle: string | null | undefined,
+): EdgeType | null {
+  for (const [edgeType, ports] of Object.entries(EDGE_TYPE_PORTS)) {
+    if (edgeType === EdgeType.SYNCHRONIZATION) continue;
+    if (ports.sourceHandle === sourceHandle && ports.targetHandle === targetHandle) {
+      return edgeType as EdgeType;
+    }
+  }
+  return null;
+}
 
 const DEFAULT_NODE_CONFIG: NodeConfig = {
   provider: "openrouter",
@@ -37,14 +61,18 @@ const DEFAULT_NODE_CONFIG: NodeConfig = {
   retries: 2,
   retry_waiting_time: 1.5,
   termination_conditions: [],
-  max_iterations: 10,
-  iteration_sleep: 0,
   token_budget: 32768,
   scope_window: 5,
   tools: [],
+  tool_strict: true,
+  tool_choice: "auto",
+  parallel_tool_calls: true,
   call_budget: 50,
   rate_limit_per_minute: 30,
   few_shot_examples: [],
+  read_upstream_state: true,
+  expose_downstream_state: true,
+  read_orchestration_state: false,
 };
 
 const NODE_TYPE_LABELS: Record<NodeType, string> = {
@@ -64,6 +92,7 @@ export default function WorkflowCanvas() {
   const addNode = useWorkflowStore((storeState) => storeState.addNode);
 
   const nodeTypes = useMemo(() => ({ agentNode: AgentNode }), []);
+  const edgeTypes = useMemo(() => ({ dataFlow: DataFlowEdge, toolCall: ToolCallEdge }), []);
 
   const onNodesChange: OnNodesChange = useCallback(
     (changes) => {
@@ -79,43 +108,29 @@ export default function WorkflowCanvas() {
     [edges, setEdges]
   );
 
+  /** Only output→input or tool→call port pairs may connect. */
+  const isValidConnection: IsValidConnection = useCallback(
+    (connection) =>
+      edgeTypeForPorts(connection.sourceHandle, connection.targetHandle) !== null,
+    []
+  );
+
   const onConnect: OnConnect = useCallback(
     (connection) => {
-      const edgeId = `edge-${crypto.randomUUID().slice(0, 8)}`;
-      const sourceNode = nodes.find((node) => node.id === connection.source);
-      const targetNode = nodes.find((node) => node.id === connection.target);
+      const edgeType = edgeTypeForPorts(connection.sourceHandle, connection.targetHandle);
+      if (edgeType === null) return;
 
-      let edgeType = EdgeType.DATA_FLOW;
-      if (
-        sourceNode?.data.nodeType === NodeType.TOOL ||
-        targetNode?.data.nodeType === NodeType.TOOL
-      ) {
-        edgeType = EdgeType.TOOL_CALL;
-      }
-
+      // The store is the single edge-construction path: it derives the
+      // ReactFlow edge (handles, component, style, marker) from the
+      // definition, exactly as it does when loading a saved schema.
       addEdgeAction({
-        edge_id: edgeId,
+        edge_id: `edge-${crypto.randomUUID().slice(0, 8)}`,
         edge_type: edgeType,
         source_node_id: connection.source!,
         target_node_id: connection.target!,
       });
-
-      setEdges(
-        addEdge(
-          {
-            ...connection,
-            id: edgeId,
-            type: "smoothstep",
-            style: edgeType === EdgeType.TOOL_CALL
-              ? { stroke: "#4ade80" }
-              : { stroke: "#4a9eff" },
-            data: { edgeType },
-          },
-          edges
-        )
-      );
     },
-    [nodes, edges, setEdges, addEdgeAction]
+    [addEdgeAction]
   );
 
   const onNodeClick = useCallback(
@@ -139,8 +154,9 @@ export default function WorkflowCanvas() {
               min_agents: 2,
               max_agents: 10,
               group_structure: GroupStructure.DEFAULT,
-              shared_state: {},
+              shared_context: {},
               tool_authorization: [],
+              sub_agent_read_group_state: true,
             }
           : null;
 
@@ -182,9 +198,11 @@ export default function WorkflowCanvas() {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        isValidConnection={isValidConnection}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         fitView
         proOptions={{ hideAttribution: true }}
       >

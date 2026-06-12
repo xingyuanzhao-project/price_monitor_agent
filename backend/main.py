@@ -38,7 +38,12 @@ from backend.server_settings import get_server_settings
 from backend.settings.models import PROVIDER_DEFAULT_ENV_VAR, LLMProviderConfig, UserSettings
 from backend.settings.persistence import SettingsPersistence
 from backend.tools.alert_dispatch import SendEmailTool, SendTelegramTool, SendWebhookTool
-from backend.tools.data_acquisition import FetchDataTool
+from backend.tools.data_acquisition import (
+    FetchExchangeDataTool,
+    FetchMacroDataTool,
+    FetchNewsDataTool,
+    FetchSocialMediaDataTool,
+)
 from backend.tools.write_output import WriteOutputTool
 from backend.tools.registry import ToolRegistry
 from backend.tools.backtest import (
@@ -96,7 +101,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     tool_registry = ToolRegistry()
     for tool_instance in [
-        FetchDataTool(),
+        FetchExchangeDataTool(),
+        FetchMacroDataTool(),
+        FetchNewsDataTool(),
+        FetchSocialMediaDataTool(),
         TechnicalAnalysisTool(),
         QuantitativeAnalysisTool(),
         SignalAnalysisTool(),

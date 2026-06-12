@@ -1,68 +1,125 @@
 """
-Frankfurter foreign exchange rate connector.
+Frankfurter foreign exchange rate request builders and response parsers.
 
-Fetches daily FX rates from 84 central banks (201 currencies) back to 1948.
-No authentication required. No rate limits.
+What it does:
+    Defines request specs and response parsers for the Frankfurter FX API.
+    Covers latest rates and historical time-series for 201 currencies from
+    84 central banks back to 1948.  No authentication required, no rate limits.
 
-API base: https://api.frankfurter.dev/v1
-Docs: https://frankfurter.dev/
+Entities in it:
+    - BASE_URL: Frankfurter API v1 root.
+    - _normalize_currency: Uppercases 3-letter currency codes.
+    - Request/parse pairs for: latest, timeseries.
+
+How used by other modules:
+    - data_acquisition.py registers these as Endpoint pairs in DISPATCH.
+    - http.fetch() calls the request function, makes the HTTP call, then
+      passes the raw JSON to the parse function.
+
+API docs: https://frankfurter.dev/
 """
 
 from typing import Any
 
-import httpx
 
 BASE_URL = "https://api.frankfurter.dev/v1"
 
 
-async def fetch_latest(
-    base: str = "EUR",
-    symbols: str = "",
-) -> dict[str, Any]:
-    """Fetch latest exchange rates.
+# ---------------------------------------------------------------------------
+# Normalization
+# ---------------------------------------------------------------------------
+
+def _normalize_currency(raw: str) -> str:
+    """Uppercase and strip a 3-letter currency code.
 
     Args:
-        base: Base currency code (e.g. "USD", "EUR").
-        symbols: Comma-separated target currencies (empty = all).
+        raw: Currency code from the LLM (e.g. "eur", " usd ").
+
+    Returns:
+        Uppercased 3-letter currency code.
+    """
+    return raw.strip().upper()
+
+
+# ---------------------------------------------------------------------------
+# latest
+# ---------------------------------------------------------------------------
+
+def latest_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for latest exchange rates.
+
+    Args:
+        **kwargs: Generic LLM params.  Uses ``symbol`` (base currency),
+                  ``symbols`` (comma-separated target currencies).
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    base = _normalize_currency(kwargs.get("symbol", "") or kwargs.get("base", "EUR"))
+    symbols_raw = kwargs.get("symbols", "")
+    params: dict[str, Any] = {"base": base}
+    if symbols_raw:
+        params["symbols"] = _normalize_currency(symbols_raw)
+    return {
+        "path": "/latest",
+        "params": params,
+    }
+
+
+def latest_parse(data: dict) -> dict[str, Any]:
+    """Parse Frankfurter latest rates JSON response.
+
+    Args:
+        data: Raw JSON dict from the API.
 
     Returns:
         Dict with base, date, and rates mapping.
     """
-    params: dict[str, Any] = {"base": base}
-    if symbols:
-        params["symbols"] = symbols
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(f"{BASE_URL}/latest", params=params)
-        resp.raise_for_status()
-        return resp.json()
+    return data
 
 
-async def fetch_timeseries(
-    base: str = "EUR",
-    symbols: str = "USD",
-    start_date: str = "",
-    end_date: str = "",
-) -> dict[str, Any]:
-    """Fetch historical exchange rate time series.
+# ---------------------------------------------------------------------------
+# timeseries
+# ---------------------------------------------------------------------------
+
+def timeseries_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for historical exchange rate time series.
 
     Args:
-        base: Base currency code.
-        symbols: Comma-separated target currencies.
-        start_date: Start date YYYY-MM-DD (defaults to 30 days ago).
-        end_date: End date YYYY-MM-DD (defaults to today).
+        **kwargs: Generic LLM params.  Uses ``symbol`` (base currency),
+                  ``symbols`` (target currencies), ``start_date``,
+                  ``end_date`` (YYYY-MM-DD).
 
     Returns:
-        Dict with base, start_date, end_date, and rates keyed by date.
+        Request spec dict for http.fetch().
     """
+    base = _normalize_currency(kwargs.get("symbol", "") or kwargs.get("base", "EUR"))
+    symbols_raw = kwargs.get("symbols", "USD")
+    start_date = kwargs.get("start_date", "")
+    end_date = kwargs.get("end_date", "")
+
     if not start_date or not end_date:
         from datetime import date, timedelta
         end_date = end_date or date.today().isoformat()
         start_date = start_date or (date.today() - timedelta(days=30)).isoformat()
-    url = f"{BASE_URL}/{start_date}..{end_date}"
+
     params: dict[str, Any] = {"base": base}
-    if symbols:
-        params["symbols"] = symbols
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        return resp.json()
+    if symbols_raw:
+        params["symbols"] = _normalize_currency(symbols_raw)
+
+    return {
+        "path": f"/{start_date}..{end_date}",
+        "params": params,
+    }
+
+
+def timeseries_parse(data: dict) -> dict[str, Any]:
+    """Parse Frankfurter timeseries JSON response.
+
+    Args:
+        data: Raw JSON dict from the API.
+
+    Returns:
+        Dict with base, start_date, end_date, and rates keyed by date.
+    """
+    return data

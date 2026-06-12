@@ -291,9 +291,28 @@ input[type="range"] {
   flex-wrap: wrap;
 }
 
+.save-error-banner {
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid var(--color-accent-red);
+  color: var(--color-accent-red);
+  font-size: 11px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+  word-break: break-word;
+}
+
 /* ============================================================
    Schema list items
    ============================================================ */
+
+.schema-list-scroll {
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 4px;
+}
 
 .schema-list-item {
   padding: 10px 12px;
@@ -313,10 +332,28 @@ input[type="range"] {
   border-color: var(--color-accent-blue);
 }
 
+.schema-list-item-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .schema-list-item-name {
   font-size: 13px;
   font-weight: 600;
   margin-bottom: 2px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btn-xs {
+  padding: 2px 8px;
+  font-size: 10px;
+  line-height: 1.4;
+  flex-shrink: 0;
 }
 
 .schema-list-item-desc {
@@ -362,6 +399,7 @@ input[type="range"] {
    ============================================================ */
 
 .agent-node {
+  position: relative;
   min-width: 180px;
   border-radius: var(--radius-md);
   background: var(--color-bg-secondary);
@@ -388,6 +426,50 @@ input[type="range"] {
 
 .agent-node.type-tool {
   border-color: var(--color-node-tool);
+}
+
+/* Tool-call ports (agent right "tools", tool left "calls") are green to
+   match the tool-call edge they carry. */
+.agent-node .react-flow__handle.port-tool {
+  background: var(--color-node-tool);
+}
+
+/* Port direction labels around the node boundary. */
+.port-label {
+  position: absolute;
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.port-label-top {
+  top: -16px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.port-label-bottom {
+  bottom: -16px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.port-label-right {
+  right: -8px;
+  top: 50%;
+  transform: translate(100%, -50%);
+  color: var(--color-node-tool);
+}
+
+.port-label-left {
+  left: -8px;
+  top: 50%;
+  transform: translate(-100%, -50%);
+  color: var(--color-node-tool);
 }
 
 .agent-node-header {
@@ -676,11 +758,13 @@ input[type="range"] {
 }
 
 .event-type.type-node_start { color: var(--color-accent-blue); }
+.event-type.type-node_input { color: var(--color-accent-yellow, #e2b93d); }
 .event-type.type-node_output { color: var(--color-text-primary); }
 .event-type.type-node_error { color: var(--color-accent-red); }
 .event-type.type-node_complete { color: var(--color-accent-green); }
 .event-type.type-tool_call { color: var(--color-accent-purple); }
 .event-type.type-tool_result { color: var(--color-accent-purple); }
+.event-type.type-run_start { color: var(--color-accent-blue); }
 .event-type.type-run_complete { color: var(--color-accent-green); }
 .event-type.type-run_error { color: var(--color-accent-red); }
 
@@ -702,6 +786,7 @@ input[type="range"] {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
 
 /* ============================================================
    Settings panel
@@ -956,4 +1041,55 @@ input[type="range"] {
 
 .text-danger {
   color: var(--color-accent-red);
+}
+
+.tool-category-option {
+  font-weight: 700;
+}
+
+.tool-child-option {
+  font-weight: 400;
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.toggle-label input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.config-section {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+
+.config-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-surface);
+  padding: 6px 10px;
+  margin: 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.config-section-body {
+  padding: 8px 10px 4px;
+}
+
+.form-input-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  font-size: 12px;
+  margin-top: 4px;
 }

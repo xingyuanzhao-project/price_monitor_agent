@@ -2,25 +2,71 @@ schema_id: simple_price_check
 name: Simple Price Check
 description: Single agent that summarizes current market conditions.
 nodes:
-  - node_id: analyst
-    node_type: agent
-    label: Market Analyst
-    config:
-      model_id: google/gemini-2.5-flash-lite
-      temperature: 0.5
-      max_tokens: 1024
-      instruction:
-        - Provide a concise summary of market conditions
-        - Include current price direction and key levels
-      retries: 2
-      retry_waiting_time: 1.5
-      termination_conditions:
-        - Summary is complete with price analysis
-      max_iterations: 3
-    position:
-      x: 300
-      y: 200
-edges: []
+- node_id: analyst
+  node_type: agent
+  label: Market Analyst
+  config:
+    provider: openrouter
+    model_id: google/gemini-2.5-pro
+    temperature: 0.5
+    max_tokens: 1024
+    response_format: null
+    instruction:
+    - Call tools to fetch OKX data.
+    - Get the most recent BTC/USDT data
+    retries: 3
+    retry_waiting_time: 1.5
+    termination_conditions:
+    - When price are fetched.
+    max_iterations: 3
+    iteration_sleep: 0.0
+    token_budget: 32768
+    scope_window: 5
+    tools: []
+    tool_strict: true
+    tool_choice: required
+    parallel_tool_calls: true
+    call_budget: 50
+    rate_limit_per_minute: 30
+    few_shot_examples: []
+  group_config: null
+  position:
+    x: 386.1865319749262
+    y: 138.6749676332256
+- node_id: tool-2cddf4fe
+  node_type: tool
+  label: Fetch OKX
+  config:
+    provider: openrouter
+    model_id: ''
+    temperature: 0.7
+    max_tokens: null
+    response_format: null
+    instruction: []
+    retries: 2
+    retry_waiting_time: 1.5
+    termination_conditions: []
+    max_iterations: 10
+    iteration_sleep: 0.0
+    token_budget: 32768
+    scope_window: 5
+    tools:
+    - fetch_exchange_data
+    tool_strict: true
+    tool_choice: auto
+    parallel_tool_calls: true
+    call_budget: 50
+    rate_limit_per_minute: 30
+    few_shot_examples: []
+  group_config: null
+  position:
+    x: 386.5371439543984
+    y: 351.150275720169
+edges:
+- edge_id: edge-9741ad2b
+  edge_type: tool_call
+  source_node_id: analyst
+  target_node_id: tool-2cddf4fe
 config:
   total_timeout: 60
   logging_level: info

@@ -348,6 +348,26 @@ async def toggle_public_source(body: TogglePublicSourceBody) -> dict:
     return {"status": "ok", "enabled_public": settings.enabled_public_sources}
 
 
+class BatchTogglePublicSourceBody(BaseModel):
+    model_config = ConfigDict(strict=True)
+    source_ids: list[str]
+    enabled: bool
+
+
+@router.post("/data-sources/public/toggle-batch")
+async def toggle_public_sources_batch(body: BatchTogglePublicSourceBody) -> dict:
+    """Enable or disable multiple public data sources at once."""
+    settings = _persistence.load_settings()
+    current = set(settings.enabled_public_sources)
+    if body.enabled:
+        current.update(body.source_ids)
+    else:
+        current -= set(body.source_ids)
+    settings.enabled_public_sources = sorted(current)
+    _persistence.save_settings(settings)
+    return {"status": "ok", "enabled_public": settings.enabled_public_sources}
+
+
 class AddAdditionalApiBody(BaseModel):
     model_config = ConfigDict(strict=True)
     source_id: str

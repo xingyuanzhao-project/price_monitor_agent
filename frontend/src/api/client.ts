@@ -15,6 +15,7 @@ import type {
   DataSourcesResponse,
   RunRecord,
   RunEvent,
+  ToolCategory,
 } from "../types/schema";
 
 const API_BASE = "/api";
@@ -160,6 +161,13 @@ export const settingsApi = {
     });
   },
 
+  togglePublicSourceBatch(sourceIds: string[], enabled: boolean): Promise<void> {
+    return request("/settings/data-sources/public/toggle-batch", {
+      method: "POST",
+      body: JSON.stringify({ source_ids: sourceIds, enabled }),
+    });
+  },
+
   addAdditionalApi(sourceId: string, apiKey: string, baseUrl: string = ""): Promise<void> {
     return request("/settings/data-sources/additional", {
       method: "POST",
@@ -191,11 +199,15 @@ export const modelsApi = {
     return data.models ?? [];
   },
 
-  async listTools(): Promise<string[]> {
+  async listTools(): Promise<{ tools: string[]; hierarchy: ToolCategory[] }> {
     const data = await request<{
       tools: Array<{ type: string; function: { name: string } }>;
+      hierarchy: ToolCategory[];
     }>("/models/tools");
-    return data.tools.map((t) => t.function.name);
+    return {
+      tools: data.tools.map((t) => t.function.name),
+      hierarchy: data.hierarchy ?? [],
+    };
   },
 };
 

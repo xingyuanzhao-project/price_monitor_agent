@@ -1,95 +1,155 @@
 """
-Polymarket Gamma API connector.
+Polymarket Gamma API request builders and response parsers.
 
-Fetches prediction market data -- events, markets, probabilities, and volume.
-No authentication required. Rate limit: 300 req/10s for markets, 500/10s for events.
+What it does:
+    Defines request specs and response parsers for Polymarket's Gamma API.
+    Covers prediction market listings, events, and keyword search.
+    No authentication required. Rate limit: 300 req/10s for markets, 500/10s for events.
 
-API base: https://gamma-api.polymarket.com
-Docs: https://docs.polymarket.com/market-data/overview
+Entities in it:
+    - BASE_URL: Polymarket Gamma API root.
+    - _normalize_tag: Ensures tag is a lowercase slug.
+    - Request/parse pairs for: markets, events, search.
+
+How used by other modules:
+    - data_acquisition.py registers these as Endpoint pairs in DISPATCH.
+    - http.fetch() calls the request function, makes the HTTP call, then
+      passes the raw JSON to the parse function.
+
+API docs: https://docs.polymarket.com/market-data/overview
 """
 
 from typing import Any
 
-import httpx
 
 BASE_URL = "https://gamma-api.polymarket.com"
 
 
-async def fetch_markets(
-    active: bool = True,
-    limit: int = 20,
-    tag: str = "",
-    order: str = "volume_24hr",
-) -> list[dict[str, Any]]:
-    """Fetch active prediction markets sorted by volume.
+# ---------------------------------------------------------------------------
+# Normalization
+# ---------------------------------------------------------------------------
+
+def _normalize_tag(raw: str) -> str:
+    """Ensure tag is a lowercase slug as required by Polymarket.
 
     Args:
-        active: Only active (open) markets.
-        limit: Max markets (max 100).
-        tag: Filter by tag slug (e.g. "politics", "crypto", "economics").
-        order: Sort field -- volume_24hr, volume, liquidity, competitive.
+        raw: Tag string from the LLM.
 
     Returns:
-        List of market dicts with question, outcomePrices, volume, liquidity.
+        Lowercase stripped tag slug.
     """
+    return raw.strip().lower()
+
+
+# ---------------------------------------------------------------------------
+# markets
+# ---------------------------------------------------------------------------
+
+def markets_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for active prediction markets sorted by volume.
+
+    Args:
+        **kwargs: Generic LLM params.  Uses ``active``, ``limit``, ``tag``,
+                  ``order``.
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    active = kwargs.get("active", True)
+    limit = min(int(kwargs.get("limit", 20)), 100)
+    tag = kwargs.get("tag", "")
+    order = kwargs.get("order", "volume_24hr")
     params: dict[str, Any] = {
         "active": str(active).lower(),
         "closed": "false",
-        "limit": min(limit, 100),
+        "limit": limit,
         "order": order,
         "ascending": "false",
     }
     if tag:
-        params["tag_slug"] = tag
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.get(f"{BASE_URL}/markets", params=params)
-        response.raise_for_status()
-        return response.json()
+        params["tag_slug"] = _normalize_tag(tag)
+    return {"path": "/markets", "params": params, "timeout": 15.0}
 
 
-async def fetch_events(
-    active: bool = True,
-    limit: int = 20,
-    tag: str = "",
-) -> list[dict[str, Any]]:
-    """Fetch prediction market events (top-level questions).
+def markets_parse(data: list) -> list[dict[str, Any]]:
+    """Parse Polymarket markets JSON response.
 
     Args:
-        active: Only active events.
-        limit: Max events (max 100).
-        tag: Filter by tag slug.
+        data: Raw JSON list from the API.
 
     Returns:
-        List of event dicts with title, markets, volume.
+        List of market dicts as returned by the API.
     """
+    return data
+
+
+# ---------------------------------------------------------------------------
+# events
+# ---------------------------------------------------------------------------
+
+def events_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for prediction market events.
+
+    Args:
+        **kwargs: Generic LLM params.  Uses ``active``, ``limit``, ``tag``.
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    active = kwargs.get("active", True)
+    limit = min(int(kwargs.get("limit", 20)), 100)
+    tag = kwargs.get("tag", "")
     params: dict[str, Any] = {
         "active": str(active).lower(),
         "closed": "false",
-        "limit": min(limit, 100),
+        "limit": limit,
     }
     if tag:
-        params["tag_slug"] = tag
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.get(f"{BASE_URL}/events", params=params)
-        response.raise_for_status()
-        return response.json()
+        params["tag_slug"] = _normalize_tag(tag)
+    return {"path": "/events", "params": params, "timeout": 15.0}
 
 
-async def search_markets(
-    query: str,
-    limit: int = 20,
-) -> list[dict[str, Any]]:
-    """Search prediction markets by keyword.
+def events_parse(data: list) -> list[dict[str, Any]]:
+    """Parse Polymarket events JSON response.
 
     Args:
-        query: Search term (e.g. "fed rate", "bitcoin", "tariff").
-        limit: Max results.
+        data: Raw JSON list from the API.
 
     Returns:
-        Search results with markets and events.
+        List of event dicts as returned by the API.
     """
-    params = {"q": query, "limit": min(limit, 100)}
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.get(f"{BASE_URL}/public-search", params=params)
-        response.raise_for_status()
-        return response.json()
+    return data
+
+
+# ---------------------------------------------------------------------------
+# search
+# ---------------------------------------------------------------------------
+
+def search_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec to search prediction markets by keyword.
+
+    Args:
+        **kwargs: Generic LLM params.  Uses ``query``, ``limit``.
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    query = kwargs.get("query", "")
+    limit = min(int(kwargs.get("limit", 20)), 100)
+    return {
+        "path": "/public-search",
+        "params": {"q": query, "limit": limit},
+        "timeout": 15.0,
+    }
+
+
+def search_parse(data: Any) -> Any:
+    """Parse Polymarket search JSON response.
+
+    Args:
+        data: Raw JSON from the API (could be dict or list).
+
+    Returns:
+        Search results as returned by the API.
+    """
+    return data

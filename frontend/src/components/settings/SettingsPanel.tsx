@@ -372,7 +372,21 @@ function PublicDataToolsSection({
     [onChanged]
   );
 
+  const handleToggleBatch = useCallback(
+    async (sourceIds: string[], enabled: boolean) => {
+      await settingsApi.togglePublicSourceBatch(sourceIds, enabled);
+      onChanged();
+    },
+    [onChanged]
+  );
+
   const categories = Object.keys(dataSources.public_sources);
+  const enabledSet = new Set(dataSources.enabled_public);
+  const allSourceIds = categories.flatMap((cat) =>
+    dataSources.public_sources[cat].map((s) => s.source_id)
+  );
+  const allEnabled = allSourceIds.length > 0 && allSourceIds.every((id) => enabledSet.has(id));
+  const someEnabled = allSourceIds.some((id) => enabledSet.has(id));
 
   return (
     <section className="settings-section">
@@ -380,23 +394,50 @@ function PublicDataToolsSection({
       <p className="text-sm text-muted" style={{ marginBottom: 12 }}>
         Free public data sources. Enable the ones you want agents to use.
       </p>
-      {categories.map((category) => (
-        <div key={category} style={{ marginBottom: 16 }}>
-          <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>
-            {DATA_CATEGORY_LABELS[category] ?? category}
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {dataSources.public_sources[category].map((source) => (
-              <PublicSourceRow
-                key={source.source_id}
-                source={source}
-                enabled={dataSources.enabled_public.includes(source.source_id)}
-                onToggle={handleToggle}
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+        <input
+          type="checkbox"
+          checked={allEnabled}
+          ref={(el) => { if (el) el.indeterminate = someEnabled && !allEnabled; }}
+          onChange={() => handleToggleBatch(allSourceIds, !allEnabled)}
+          style={{ width: 16, height: 16, cursor: "pointer" }}
+        />
+        <span style={{ fontWeight: 700, fontSize: 13 }}>Select All</span>
+      </div>
+
+      {categories.map((category) => {
+        const catSources = dataSources.public_sources[category];
+        const catIds = catSources.map((s) => s.source_id);
+        const catAllEnabled = catIds.length > 0 && catIds.every((id) => enabledSet.has(id));
+        const catSomeEnabled = catIds.some((id) => enabledSet.has(id));
+        return (
+          <div key={category} style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <input
+                type="checkbox"
+                checked={catAllEnabled}
+                ref={(el) => { if (el) el.indeterminate = catSomeEnabled && !catAllEnabled; }}
+                onChange={() => handleToggleBatch(catIds, !catAllEnabled)}
+                style={{ width: 16, height: 16, cursor: "pointer" }}
               />
-            ))}
+              <span style={{ fontWeight: 600, fontSize: 13 }}>
+                {DATA_CATEGORY_LABELS[category] ?? category}
+              </span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingLeft: 24 }}>
+              {catSources.map((source) => (
+                <PublicSourceRow
+                  key={source.source_id}
+                  source={source}
+                  enabled={enabledSet.has(source.source_id)}
+                  onToggle={handleToggle}
+                />
+              ))}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </section>
   );
 }

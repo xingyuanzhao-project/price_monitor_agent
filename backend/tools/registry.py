@@ -4,17 +4,69 @@ Tool registry for managing tool instances.
 What it does:
     Provides a central registry where tool instances are registered by name,
     retrieved by name, listed, and exported as LLM-compatible tool definitions.
+    Defines the canonical TOOL_HIERARCHY used by both the backend executor
+    and the frontend tool-selector UI.
 
 Entities in it:
+    - TOOL_HIERARCHY: Ordered list of tool categories, each with its child
+      tool names.  This is the single source of truth consumed by the API
+      (``/api/models/tools``) and the frontend hierarchical selector.
     - ToolRegistry: Singleton-style registry mapping tool names to BaseTool instances.
 
 How used by other modules:
     - The application startup registers all available tools into the registry.
     - The agent execution loop calls get() to resolve tool names from LLM responses.
     - The LLM provider receives get_tool_definitions() output as the tools parameter.
+    - The models API calls get_tool_hierarchy() to serve category structure.
 """
 
 from backend.tools.base import BaseTool
+
+TOOL_HIERARCHY: list[dict[str, object]] = [
+    {
+        "category": "Fetch Data",
+        "tools": [
+            "fetch_exchange_data",
+            "fetch_macro_data",
+            "fetch_news_data",
+            "fetch_social_media_data",
+        ],
+    },
+    {
+        "category": "Data Analysis",
+        "tools": [
+            "technical_analysis",
+            "quantitative_analysis",
+            "signal_analysis",
+            "diagnostic_analysis",
+            "detect_regime",
+            "estimate_parameters",
+            "simulate_process",
+            "run_monte_carlo",
+        ],
+    },
+    {
+        "category": "Text Analysis",
+        "tools": [
+            "chunk_text",
+            "semantic_search",
+            "extract_entities",
+            "classify_text",
+            "score_text",
+            "summarize_text",
+            "cross_modal_alignment",
+        ],
+    },
+    {
+        "category": "Output",
+        "tools": [
+            "send_webhook",
+            "send_email",
+            "send_telegram",
+            "write_output",
+        ],
+    },
+]
 
 
 class ToolRegistry:
@@ -132,3 +184,19 @@ class ToolRegistry:
             }
             definitions.append(definition)
         return definitions
+
+    def get_tool_hierarchy(self) -> list[dict[str, object]]:
+        """Return TOOL_HIERARCHY filtered to only contain registered tools.
+
+        Each category entry keeps its order but omits tool names that are
+        not present in this registry instance.  Empty categories are dropped.
+        """
+        registered = set(self._tools)
+        result: list[dict[str, object]] = []
+        for entry in TOOL_HIERARCHY:
+            filtered_tools = [
+                t for t in entry["tools"] if t in registered  # type: ignore[union-attr]
+            ]
+            if filtered_tools:
+                result.append({"category": entry["category"], "tools": filtered_tools})
+        return result

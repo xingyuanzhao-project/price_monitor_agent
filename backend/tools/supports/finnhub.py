@@ -1,103 +1,174 @@
 """
-Finnhub API support.
+Finnhub API request builders and response parsers.
 
-Fetches stock market data, company profiles, earnings, and news from Finnhub.
-Requires a free API key.
+What it does:
+    Defines request specs and response parsers for Finnhub's REST API v1.
+    Covers real-time quotes, company news, and earnings surprises.
+    Requires a free API key (passed as parameter via ``token``).
 
-API base: https://finnhub.io/api/v1/
-Docs: https://finnhub.io/docs/api
+Entities in it:
+    - BASE_URL: Finnhub API v1 root.
+    - _normalize_symbol: Uppercases and strips the ticker symbol.
+    - Request/parse pairs for: quote, news, earnings.
+
+How used by other modules:
+    - data_acquisition.py registers these as Endpoint pairs in DISPATCH.
+    - http.fetch() calls the request function, makes the HTTP call, then
+      passes the raw JSON to the parse function.
+
+API docs: https://finnhub.io/docs/api
 """
 
 from typing import Any
 
-import httpx
 
 BASE_URL = "https://finnhub.io/api/v1"
 
 
-async def fetch_quote(symbol: str, api_key: str) -> dict[str, Any]:
-    """Fetch real-time quote.
+# ---------------------------------------------------------------------------
+# Normalization
+# ---------------------------------------------------------------------------
+
+def _normalize_symbol(raw: str) -> str:
+    """Uppercase and strip the ticker symbol for Finnhub.
 
     Args:
-        symbol: Stock ticker (e.g. "AAPL").
-        api_key: Finnhub API key.
+        raw: Symbol string from the LLM.
+
+    Returns:
+        Uppercase stripped symbol.
+    """
+    return raw.upper().strip()
+
+
+# ---------------------------------------------------------------------------
+# quote
+# ---------------------------------------------------------------------------
+
+def quote_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for a real-time stock quote.
+
+    Args:
+        **kwargs: Generic LLM params.  Uses ``symbol``, ``api_key``.
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    symbol = _normalize_symbol(kwargs.get("symbol", ""))
+    api_key = kwargs.get("api_key", "")
+    return {
+        "path": "/quote",
+        "params": {"symbol": symbol, "token": api_key},
+    }
+
+
+def quote_parse(data: dict) -> dict[str, Any]:
+    """Parse Finnhub quote JSON response.
+
+    Args:
+        data: Raw JSON dict from the API.
 
     Returns:
         Dict with current, high, low, open, prev_close, change, change_pct.
     """
-    url = f"{BASE_URL}/quote"
-    params = {"symbol": symbol, "token": api_key}
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        return {
-            "current": data.get("c"),
-            "high": data.get("h"),
-            "low": data.get("l"),
-            "open": data.get("o"),
-            "prev_close": data.get("pc"),
-            "change": data.get("d"),
-            "change_pct": data.get("dp"),
-        }
+    return {
+        "current": data.get("c"),
+        "high": data.get("h"),
+        "low": data.get("l"),
+        "open": data.get("o"),
+        "prev_close": data.get("pc"),
+        "change": data.get("d"),
+        "change_pct": data.get("dp"),
+    }
 
 
-async def fetch_company_news(
-    symbol: str,
-    api_key: str,
-    from_date: str,
-    to_date: str,
-) -> list[dict[str, Any]]:
-    """Fetch company news articles.
+# ---------------------------------------------------------------------------
+# news (company news)
+# ---------------------------------------------------------------------------
+
+def news_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for company news articles.
 
     Args:
-        symbol: Stock ticker.
-        api_key: Finnhub API key.
-        from_date: Start date (YYYY-MM-DD), required by the API.
-        to_date: End date (YYYY-MM-DD), required by the API.
+        **kwargs: Generic LLM params.  Uses ``symbol``, ``api_key``,
+                  ``from_date``, ``to_date``.
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    symbol = _normalize_symbol(kwargs.get("symbol", ""))
+    api_key = kwargs.get("api_key", "")
+    from_date = kwargs.get("from_date", "")
+    to_date = kwargs.get("to_date", "")
+    return {
+        "path": "/company-news",
+        "params": {
+            "symbol": symbol,
+            "from": from_date,
+            "to": to_date,
+            "token": api_key,
+        },
+    }
+
+
+def news_parse(data: list) -> list[dict[str, Any]]:
+    """Parse Finnhub company news JSON response.
+
+    Args:
+        data: Raw JSON list from the API.
 
     Returns:
         List of article dicts with headline, source, url, datetime, summary.
     """
-    url = f"{BASE_URL}/company-news"
-    params = {"symbol": symbol, "from": from_date, "to": to_date, "token": api_key}
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        articles = []
-        for a in resp.json():
-            articles.append({
-                "headline": a.get("headline", ""),
-                "source": a.get("source", ""),
-                "url": a.get("url", ""),
-                "datetime": a.get("datetime"),
-                "summary": a.get("summary", "")[:500],
-            })
-        return articles
+    return [
+        {
+            "headline": a.get("headline", ""),
+            "source": a.get("source", ""),
+            "url": a.get("url", ""),
+            "datetime": a.get("datetime"),
+            "summary": a.get("summary", "")[:500],
+        }
+        for a in data
+    ]
 
 
-async def fetch_earnings(symbol: str, api_key: str) -> list[dict[str, Any]]:
-    """Fetch earnings surprises.
+# ---------------------------------------------------------------------------
+# earnings
+# ---------------------------------------------------------------------------
+
+def earnings_request(**kwargs: Any) -> dict[str, Any]:
+    """Build request spec for earnings surprises.
 
     Args:
-        symbol: Stock ticker.
-        api_key: Finnhub API key.
+        **kwargs: Generic LLM params.  Uses ``symbol``, ``api_key``.
+
+    Returns:
+        Request spec dict for http.fetch().
+    """
+    symbol = _normalize_symbol(kwargs.get("symbol", ""))
+    api_key = kwargs.get("api_key", "")
+    return {
+        "path": "/stock/earnings",
+        "params": {"symbol": symbol, "token": api_key},
+    }
+
+
+def earnings_parse(data: list) -> list[dict[str, Any]]:
+    """Parse Finnhub earnings JSON response.
+
+    Args:
+        data: Raw JSON list from the API.
 
     Returns:
         List of earnings dicts with period, actual, estimate, surprise, surprise_pct.
     """
-    url = f"{BASE_URL}/stock/earnings"
-    params = {"symbol": symbol, "token": api_key}
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        earnings = []
-        for e in resp.json():
-            earnings.append({
-                "period": e.get("period"),
-                "actual": e.get("actual"),
-                "estimate": e.get("estimate"),
-                "surprise": e.get("surprise"),
-                "surprise_pct": e.get("surprisePercent"),
-            })
-        return earnings
+    return [
+        {
+            "period": e.get("period"),
+            "actual": e.get("actual"),
+            "estimate": e.get("estimate"),
+            "surprise": e.get("surprise"),
+            "surprise_pct": e.get("surprisePercent"),
+        }
+        for e in data
+    ]

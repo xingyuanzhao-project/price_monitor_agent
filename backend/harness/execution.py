@@ -2,11 +2,13 @@
 Execution harness for tool-call routing, authorization, and rate limiting.
 
 What it does:
-    Receives the full LLM assistant message and produces the normalized
-    ToolRequest structure: {native_tool_request, non_native_tool_request}.
-    Then dispatches to the tool support layer, which decides how to handle
-    each path. Gates every outbound tool call through authorization, budget,
-    and rate-limit checks. Handles artifact writing for large results.
+    Receives the full LLM assistant message, extracts one ToolRequest per
+    entry in its structured ``tool_calls`` block, and dispatches each to
+    the tool registry.  Gates every outbound tool call through
+    authorization, budget, and rate-limit checks. Handles artifact writing
+    for large results.  A message without ``tool_calls`` is a final
+    answer: the harness returns no results and never re-interprets text
+    as a tool request.
 
 Entities in it:
     - ToolRequest: normalized structure the harness produces from LLM output.
@@ -16,9 +18,10 @@ Entities in it:
 
 How used by other modules:
     The orchestration executor creates one ExecutionHarness per workflow node.
-    CoreAgent calls ``process_response(assistant_message)`` which extracts the
-    ToolRequest structure, dispatches to tools, handles artifacts, and returns
-    formatted messages ready for the conversation.
+    The AgentLoop calls ``process_response(assistant_message)`` (wired in as
+    its tool_call_handler) which extracts the ToolRequest structure,
+    dispatches to tools, handles artifacts, and returns formatted messages
+    ready for the conversation.
 """
 
 from __future__ import annotations
@@ -93,11 +96,14 @@ def _enforce_strict(node: dict) -> None:
 class ToolRequest:
     """Normalized tool request extracted from an LLM response.
 
-    The harness always produces this same structure. One field is populated,
-    the other is None. The tool support layer decides what to do with it.
+    One entry per structured tool call in the assistant message's
+    ``tool_calls`` block.  The tool_calls block is the single
+    authoritative signal that the agent requested a tool — plain text
+    content is never re-interpreted as a tool request.
     """
-    native_tool_request: dict | None
-    non_native_tool_request: str | None
+    tool_call_id: str
+    tool_name: str
+    arguments: dict
 
 
 # ---------------------------------------------------------------------------
@@ -143,12 +149,11 @@ class ToolBudgetExhaustedError(Exception):
 # ---------------------------------------------------------------------------
 
 class ExecutionHarness:
-    """Produces ToolRequest from LLM output, dispatches to tools, handles artifacts.
+    """Produces ToolRequests from LLM output, dispatches to tools, handles artifacts.
 
-    The harness extracts the structure {native_tool_request, non_native_tool_request}
-    from the assistant message. The tool support layer receives this and decides:
-    - If native_tool_request exists → dispatch directly
-    - If non_native_tool_request → tool uses parse_request to extract canonical args
+    The harness extracts one ToolRequest per entry in the assistant
+    message's structured ``tool_calls`` block and dispatches each through
+    authorization, budget, and rate-limit gates to the tool registry.
     """
 
     def __init__(
@@ -174,50 +179,36 @@ class ExecutionHarness:
         # content}.  The executor reads this to route results to TOOL nodes.
         self.calls_log: list[dict[str, Any]] = []
 
-    # -- primary interface: called by CoreAgent ------------------------------
+    # -- primary interface: called by the AgentLoop ---------------------------
 
     async def process_response(self, assistant_message: dict[str, Any]) -> list[dict[str, Any]]:
         """Process a full LLM assistant message through the tool pipeline.
 
-        1. Extract ToolRequest(s) from the message
-        2. For each request, dispatch to the tool support layer
+        1. Extract one ToolRequest per entry in the ``tool_calls`` block
+        2. For each request, dispatch through the authorization/budget gates
         3. Handle artifacts for large results
         4. Return formatted messages for the conversation
 
         Returns:
-            List of message dicts to append to conversation. Empty if no tool
-            action was taken (non-native path found no match).
+            List of message dicts to append to conversation. Empty if the
+            message contains no structured tool_calls.
         """
         tool_calls_block = assistant_message.get("tool_calls")
+        if not tool_calls_block:
+            return []
 
-        if tool_calls_block:
-            # Native path: LLM produced structured tool_calls
-            results = []
-            for tc in tool_calls_block:
-                request = ToolRequest(
-                    native_tool_request={
-                        "id": tc["id"],
-                        "name": tc["function"]["name"],
-                        "arguments": json.loads(tc["function"].get("arguments", "{}")),
-                    },
-                    non_native_tool_request=None,
-                )
-                entry = await self._dispatch(request)
-                results.append(self._format_result_message(entry, tool_call_id=tc["id"]))
-            return results
-
-        content = assistant_message.get("content", "")
-        if content:
-            # Non-native path: LLM produced text, pass to tool layer for parsing
+        results = []
+        for tool_call in tool_calls_block:
             request = ToolRequest(
-                native_tool_request=None,
-                non_native_tool_request=content,
+                tool_call_id=tool_call["id"],
+                tool_name=tool_call["function"]["name"],
+                arguments=json.loads(tool_call["function"].get("arguments", "{}")),
             )
             entry = await self._dispatch(request)
-            if entry is not None:
-                return [self._format_result_message(entry, tool_call_id=None)]
-
-        return []
+            results.append(
+                self._format_result_message(entry, tool_call_id=request.tool_call_id)
+            )
+        return results
 
     def get_tool_definitions(
         self, tool_names: list[str], *, strict: bool = True,
@@ -256,67 +247,37 @@ class ExecutionHarness:
 
     # -- dispatch logic -----------------------------------------------------
 
-    async def _dispatch(self, request: ToolRequest) -> dict[str, Any] | None:
-        """Route a ToolRequest to the tool support layer.
+    async def _dispatch(self, request: ToolRequest) -> dict[str, Any]:
+        """Route a ToolRequest through the gates to the tool registry.
 
-        The tool layer decides:
-        - native_tool_request exists → use name + args directly
-        - non_native_tool_request → iterate authorized tools, call parse_request,
-          first match wins
+        Enforces authorization, call budget, and rate limit, then executes
+        the tool with the request's arguments.
 
         Returns:
-            The normalized call-log entry (also appended to
-            ``calls_log``), or None when the non-native path found no
-            matching tool.
+            The normalized call-log entry (also appended to ``calls_log``).
+
+        Raises:
+            ToolAuthorizationError: If the tool is outside the authorized set.
+            ToolBudgetExhaustedError: If the call budget is spent.
         """
-        if request.native_tool_request:
-            tool_name = request.native_tool_request["name"]
-            arguments = request.native_tool_request["arguments"]
+        tool_name = request.tool_name
+        arguments = request.arguments
 
-            if tool_name not in self.authorized_tools:
-                raise ToolAuthorizationError(tool_name, set(self.authorized_tools))
-            if self._call_count >= self.call_budget:
-                raise ToolBudgetExhaustedError(self.call_budget, self._call_count)
-            await self._enforce_rate_limit()
+        if tool_name not in self.authorized_tools:
+            raise ToolAuthorizationError(tool_name, set(self.authorized_tools))
+        if self._call_count >= self.call_budget:
+            raise ToolBudgetExhaustedError(self.call_budget, self._call_count)
+        await self._enforce_rate_limit()
 
-            tool = self.tool_registry.get(tool_name)
-            self._inject_credentials(tool)
-            tool.inject_event_callback(self._event_callback)
+        tool = self.tool_registry.get(tool_name)
+        self._inject_credentials(tool)
+        tool.inject_event_callback(self._event_callback)
 
-            await self._emit_tool_event("tool_call", tool_name, arguments)
+        await self._emit_tool_event("tool_call", tool_name, arguments)
 
-            _LOGGER.info("Native tool dispatch: %s(%s)", tool_name, list(arguments.keys()))
-            result = await tool.execute(**arguments)
-            return await self._finalize_call(tool, tool_name, arguments, result)
-
-        elif request.non_native_tool_request:
-            text = request.non_native_tool_request
-            _LOGGER.info("Non-native tool request: trying parse_request on %d authorized tools",
-                         len(self.authorized_tools))
-
-            for tool_name in self.authorized_tools:
-                if self._call_count >= self.call_budget:
-                    break
-                try:
-                    tool = self.tool_registry.get(tool_name)
-                except KeyError:
-                    continue
-
-                parsed_args = tool.parse_request(text)
-                if parsed_args is not None:
-                    await self._enforce_rate_limit()
-                    self._inject_credentials(tool)
-                    tool.inject_event_callback(self._event_callback)
-
-                    await self._emit_tool_event("tool_call", tool_name, parsed_args)
-
-                    _LOGGER.info("Non-native match: %s parsed args=%s", tool_name, list(parsed_args.keys()))
-                    result = await tool.execute(**parsed_args)
-                    return await self._finalize_call(tool, tool_name, parsed_args, result)
-
-            return None
-
-        return None
+        _LOGGER.info("Tool dispatch: %s(%s)", tool_name, list(arguments.keys()))
+        result = await tool.execute(**arguments)
+        return await self._finalize_call(tool, tool_name, arguments, result)
 
     async def _finalize_call(
         self,
@@ -391,11 +352,9 @@ class ExecutionHarness:
             return tool_result.content
         return json.dumps(tool_result.content, default=str)
 
-    def _format_result_message(self, entry: dict[str, Any], tool_call_id: str | None) -> dict[str, Any]:
-        """Format a call-log entry into a conversation message."""
-        if tool_call_id:
-            return {"role": "tool", "tool_call_id": tool_call_id, "content": entry["content"]}
-        return {"role": "user", "content": f"[Data retrieved — {entry['data_type']}]:\n{entry['content']}"}
+    def _format_result_message(self, entry: dict[str, Any], tool_call_id: str) -> dict[str, Any]:
+        """Format a call-log entry into a tool-role conversation message."""
+        return {"role": "tool", "tool_call_id": tool_call_id, "content": entry["content"]}
 
     # -- helpers ------------------------------------------------------------
 

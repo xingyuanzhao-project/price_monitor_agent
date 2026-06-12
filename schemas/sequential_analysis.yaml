@@ -1,50 +1,80 @@
 schema_id: sequential_analysis
 name: Sequential Analysis Pipeline
-description: Two agents in sequence — first gathers context, second analyzes.
+description: "Two agents in sequence \u2014 first gathers context, second analyzes."
 nodes:
-  - node_id: data_gatherer
-    node_type: agent
-    label: Data Gatherer
-    config:
-      model_id: google/gemini-2.5-flash-lite
-      temperature: 0.3
-      max_tokens: 2048
-      instruction:
-        - Collect and structure relevant market information
-        - Output must be factual and well-organized
-      retries: 2
-      retry_waiting_time: 1.5
-      termination_conditions:
-        - Data collection is sufficient for analysis
-      max_iterations: 5
-    position:
-      x: 200
-      y: 150
-  - node_id: analyst
-    node_type: agent
-    label: Senior Analyst
-    config:
-      model_id: google/gemini-2.5-flash-lite
-      temperature: 0.7
-      max_tokens: 2048
-      instruction:
-        - Produce a structured analysis based on the gathered data
-        - Include risk assessment and confidence level
-      retries: 2
-      retry_waiting_time: 1.5
-      termination_conditions:
-        - Analysis includes both bullish and bearish scenarios
-      max_iterations: 5
-    position:
-      x: 500
-      y: 150
+- node_id: data_gatherer
+  node_type: agent
+  label: Data Gatherer
+  config:
+    provider: openrouter
+    model_id: google/gemini-2.5-flash-lite
+    temperature: 0.3
+    max_tokens: 2048
+    response_format: null
+    instruction:
+    - Collect and structure relevant market information
+    - Output must be factual and well-organized
+    retries: 2
+    retry_waiting_time: 1.5
+    termination_conditions:
+    - Data collection is sufficient for analysis
+    token_budget: 32768
+    scope_window: 5
+    tools: []
+    tool_strict: true
+    tool_choice: auto
+    parallel_tool_calls: true
+    call_budget: 50
+    rate_limit_per_minute: 30
+    few_shot_examples: []
+    read_upstream_state: true
+    expose_downstream_state: true
+    read_orchestration_state: false
+  group_config: null
+  position:
+    x: 200.0
+    y: 150.0
+- node_id: analyst
+  node_type: agent
+  label: Senior Analyst
+  config:
+    provider: openrouter
+    model_id: google/gemini-2.5-flash-lite
+    temperature: 0.7
+    max_tokens: 2048
+    response_format: null
+    instruction:
+    - Produce a structured analysis based on the gathered data
+    - Include risk assessment and confidence level
+    retries: 2
+    retry_waiting_time: 1.5
+    termination_conditions:
+    - Analysis includes both bullish and bearish scenarios
+    token_budget: 32768
+    scope_window: 5
+    tools: []
+    tool_strict: true
+    tool_choice: auto
+    parallel_tool_calls: true
+    call_budget: 50
+    rate_limit_per_minute: 30
+    few_shot_examples: []
+    read_upstream_state: true
+    expose_downstream_state: true
+    read_orchestration_state: false
+  group_config: null
+  position:
+    x: 500.0
+    y: 150.0
 edges:
-  - edge_id: data_to_analyst
-    edge_type: data_flow
-    source_node_id: data_gatherer
-    target_node_id: analyst
+- edge_id: data_to_analyst
+  edge_type: data_flow
+  source_node_id: data_gatherer
+  target_node_id: analyst
 config:
   total_timeout: 120
   logging_level: info
   trace_enabled: true
-  dead_loop_detection: true
+  max_loop_rounds: 3
+  max_iterations: 5
+  iteration_sleep: 0.0

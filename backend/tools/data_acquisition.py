@@ -15,22 +15,19 @@ Entities in it:
     - FetchExchangeDataTool, FetchMacroDataTool, FetchNewsDataTool,
       FetchSocialMediaDataTool: Category-specific BaseTool subclasses.
     - _execute_fetch: Shared execution logic called by all four tools.
-    - _build_parameters_schema, _parse_fetch_request: LLM interface helpers.
+    - _build_parameters_schema: LLM parameters-schema helper.
 
 How used by other modules:
     - main.py instantiates and registers the four Fetch*DataTool classes.
-    - The execution harness calls execute() which delegates to _execute_fetch.
+    - The execution harness dispatches each structured tool call to
+      execute(), which delegates to _execute_fetch with the call's
+      source_id + source_type + args.
     - _execute_fetch uses http.fetch() as the single HTTP convergence point.
-
-Receives ToolRequests from the execution harness:
-- Native path: source_id + source_type + args → dispatch directly.
-- Non-native path: text → parse_request extracts source + type + args.
 """
 
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from backend.tools.base import BaseTool, ToolExecutionError, ToolResult
@@ -237,58 +234,6 @@ DISPATCH: dict[str, dict[str, Endpoint]] = {
     },
 }
 
-# Source name aliases for non-native text parsing
-_SOURCE_ALIASES: dict[str, str] = {
-    "okx": "okx", "binance": "binance", "coingecko": "coingecko",
-    "coin gecko": "coingecko", "fred": "fred", "ecb": "ecb",
-    "guardian": "guardian", "the guardian": "guardian",
-    "hacker news": "hackernews", "hackernews": "hackernews", "hn": "hackernews",
-    "mastodon": "mastodon",
-    "alpha vantage": "alphavantage", "alphavantage": "alphavantage",
-    "polygon": "polygon", "polygon.io": "polygon",
-    "finnhub": "finnhub", "newsapi": "newsapi", "news api": "newsapi",
-    "twitter": "twitter", "x": "twitter",
-    "quandl": "quandl", "nasdaq": "quandl", "nasdaq data link": "quandl",
-    "yahoo": "yahoo", "yahoo finance": "yahoo", "yfinance": "yahoo",
-    "frankfurter": "frankfurter", "forex": "frankfurter",
-    "world bank": "worldbank", "worldbank": "worldbank",
-    "imf": "imf", "international monetary fund": "imf",
-    "gdelt": "gdelt",
-    "isw": "isw", "understandingwar": "isw", "institute for the study of war": "isw",
-    "oksurf": "oksurf", "google news": "oksurf",
-    "wikievents": "wikievents", "wikipedia events": "wikievents", "offstream": "wikievents",
-    "thehear": "thehear", "the hear": "thehear",
-    "github": "github", "github trending": "github",
-    "lemmy": "lemmy",
-    "polymarket": "polymarket", "prediction market": "polymarket",
-    "open-meteo": "openmeteo", "openmeteo": "openmeteo", "open meteo": "openmeteo", "weather": "openmeteo",
-    "bis": "bis", "bank for international settlements": "bis",
-    "usgs": "usgs", "earthquake": "usgs",
-    "gdacs": "gdacs", "disaster alert": "gdacs",
-    "eonet": "eonet", "nasa eonet": "eonet", "natural event": "eonet",
-    "usaspending": "usaspending", "usa spending": "usaspending", "federal spending": "usaspending",
-    "comtrade": "comtrade", "un comtrade": "comtrade", "trade flow": "comtrade",
-    "predscope": "predscope",
-}
-
-# Type keywords for non-native text parsing
-_TYPE_KEYWORDS: dict[str, str] = {
-    "candle": "ohlcv", "candlestick": "ohlcv", "ohlcv": "ohlcv", "kline": "ohlcv",
-    "price": "ticker", "ticker": "ticker", "quote": "ticker",
-    "orderbook": "orderbook", "order book": "orderbook", "depth": "orderbook",
-    "trade": "trades", "trades": "trades", "recent trades": "trades",
-    "headline": "headlines", "headlines": "headlines", "news": "headlines",
-    "article": "search", "search": "search",
-    "series": "series", "indicator": "series", "economic": "series",
-    "exchange rate": "exchange_rates",
-    "subreddit": "subreddit", "timeline": "timeline",
-    "top stories": "top_stories", "top": "top_stories",
-}
-
-# Regex for symbol extraction
-_SYMBOL_PATTERN = re.compile(r"\b([A-Z]{2,10}[-/]?[A-Z]{2,10})\b")
-
-
 SOURCE_CATEGORIES: dict[str, list[str]] = {
     "exchange": [
         "okx", "binance", "coingecko", "yahoo", "alphavantage",
@@ -330,40 +275,6 @@ def _build_parameters_schema(allowed_sources: list[str]) -> dict:
         },
         "required": ["source_id", "source_type"],
     }
-
-
-def _parse_fetch_request(text: str, allowed_sources: list[str]) -> dict | None:
-    """Parse natural language text into fetch arguments, restricted to *allowed_sources*."""
-    text_lower = text.lower()
-    allowed = set(allowed_sources)
-
-    source_id = None
-    for alias, sid in _SOURCE_ALIASES.items():
-        if alias in text_lower and sid in allowed:
-            source_id = sid
-            break
-
-    if source_id is None:
-        return None
-
-    source_type = None
-    for keyword, stype in _TYPE_KEYWORDS.items():
-        if keyword in text_lower and stype in DISPATCH.get(source_id, {}):
-            source_type = stype
-            break
-
-    if source_type is None:
-        available_types = list(DISPATCH.get(source_id, {}).keys())
-        if available_types:
-            source_type = available_types[0]
-        else:
-            return None
-
-    args: dict[str, Any] = {"source_id": source_id, "source_type": source_type}
-    symbol_match = _SYMBOL_PATTERN.search(text)
-    if symbol_match:
-        args["symbol"] = symbol_match.group(1)
-    return args
 
 
 async def _execute_fetch(
@@ -455,9 +366,6 @@ class FetchExchangeDataTool(BaseTool):
     def parameters_schema(self) -> dict:
         return _build_parameters_schema(self._SOURCES)
 
-    def parse_request(self, text: str) -> dict | None:
-        return _parse_fetch_request(text, self._SOURCES)
-
     async def execute(self, **kwargs: Any) -> ToolResult:
         return await _execute_fetch(
             kwargs, self._SOURCES, self.credentials.get("_enabled_public_sources"),
@@ -484,9 +392,6 @@ class FetchMacroDataTool(BaseTool):
     @property
     def parameters_schema(self) -> dict:
         return _build_parameters_schema(self._SOURCES)
-
-    def parse_request(self, text: str) -> dict | None:
-        return _parse_fetch_request(text, self._SOURCES)
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         return await _execute_fetch(
@@ -515,9 +420,6 @@ class FetchNewsDataTool(BaseTool):
     def parameters_schema(self) -> dict:
         return _build_parameters_schema(self._SOURCES)
 
-    def parse_request(self, text: str) -> dict | None:
-        return _parse_fetch_request(text, self._SOURCES)
-
     async def execute(self, **kwargs: Any) -> ToolResult:
         return await _execute_fetch(
             kwargs, self._SOURCES, self.credentials.get("_enabled_public_sources"),
@@ -544,9 +446,6 @@ class FetchSocialMediaDataTool(BaseTool):
     @property
     def parameters_schema(self) -> dict:
         return _build_parameters_schema(self._SOURCES)
-
-    def parse_request(self, text: str) -> dict | None:
-        return _parse_fetch_request(text, self._SOURCES)
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         return await _execute_fetch(

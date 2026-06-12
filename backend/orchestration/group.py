@@ -4,7 +4,10 @@ Agent group orchestration for coordinating multiple sub-agents.
 What it does:
     Implements the AgentGroup class which uses an LLM planner phase to
     decompose a task into sub-agent assignments, then executes those
-    sub-agents according to the configured group structure.
+    sub-agents according to the configured group structure.  Each
+    sub-agent is a CoreAgent driven to completion by an AgentLoop, so
+    sub-agents follow exactly the same round-trip discipline as
+    standalone agent nodes.
 
     Four distinct execution structures:
         PARALLEL — all sub-agents execute concurrently (semaphore-bounded).
@@ -28,9 +31,9 @@ Entities in it:
     - AgentGroup: Orchestrator that plans and executes a group of sub-agents.
 
 How used by other modules:
-    - The orchestration engine creates AgentGroup instances for AGENT_GROUP
-      nodes in the workflow schema.
-    - Each sub-agent is instantiated as a CoreAgent during execution.
+    - backend.orchestration.executor creates AgentGroup instances for
+      AGENT_GROUP nodes in the workflow schema, passing the workflow
+      config's max_iterations / iteration_sleep at construction.
     - Tool calls from sub-agents are dispatched via the shared tool_call_handler.
 """
 
@@ -39,14 +42,15 @@ import json
 import logging
 from typing import Any, Callable, Optional
 
-from backend.agent.core import AgentExecutionError, CoreAgent
-
-_LOGGER = logging.getLogger(__name__)
+from backend.agent.core import CoreAgent
 from backend.agent.llm_provider import LLMProvider
 from backend.harness.context import ContextHarness
+from backend.orchestration.agent_loop import AgentExecutionError, AgentLoop
 from backend.prompts import load_prompt_template
 from backend.schema.models import AgentGroupConfig, GroupStructure, NodeConfig
 from backend.state import GroupState
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class AgentGroup:
@@ -57,7 +61,9 @@ class AgentGroup:
         assignments, then executes according to ``group_config.group_structure``.
         Tool authorization is gated by ``group_config.tool_authorization``.
         Group context from ``group_config.shared_context`` is injected into each
-        sub-agent and updated after each sub-agent completes.
+        sub-agent and updated after each sub-agent completes.  Every
+        sub-agent runs as a CoreAgent inside an AgentLoop bounded by the
+        workflow-level ``max_iterations``.
 
     Attributes:
         node_id: Unique identifier for this group node.
@@ -67,6 +73,10 @@ class AgentGroup:
             authorization settings.
         llm_provider: LLMProvider for the planner and sub-agent LLM calls.
         tool_call_handler: Async callable for executing tool calls.
+        max_iterations: Agentic-loop ceiling for each sub-agent, from the
+            workflow config.
+        iteration_sleep: Inter-iteration sleep for each sub-agent, from
+            the workflow config.
         emit_event: Optional async-compatible callback for trace events.
 
     Methods:
@@ -81,13 +91,16 @@ class AgentGroup:
         group_config: AgentGroupConfig,
         llm_provider: LLMProvider,
         tool_call_handler: Callable,
+        max_iterations: int,
+        iteration_sleep: float,
         emit_event: Optional[Callable] = None,
     ) -> None:
         """Initialize the AgentGroup with its configuration and dependencies.
 
         Description:
             Stores all parameters needed for planning and orchestrating
-            sub-agents.
+            sub-agents, including the workflow-level loop control values
+            applied to every sub-agent's AgentLoop.
 
         Params:
             node_id (str): Unique group node identifier.
@@ -97,6 +110,10 @@ class AgentGroup:
             llm_provider (LLMProvider): Provider for LLM API calls.
             tool_call_handler (Callable): Async function to execute tool calls.
                 Signature: async (assistant_message: dict) -> list[dict]
+            max_iterations (int): Agentic-loop ceiling for each sub-agent,
+                from the workflow config.
+            iteration_sleep (float): Inter-iteration sleep for each
+                sub-agent, from the workflow config.
             emit_event (Optional[Callable]): Optional async-compatible callback
                 for trace events.
 
@@ -109,19 +126,14 @@ class AgentGroup:
         self.group_config = group_config
         self.llm_provider = llm_provider
         self.tool_call_handler = tool_call_handler
+        self.max_iterations = max_iterations
+        self.iteration_sleep = iteration_sleep
         self.emit_event = emit_event
-        # Loop bound and pacing for sub-agents, supplied by orchestration
-        # in execute() from the workflow config (not per-node).
-        self._max_iterations: int = 0
-        self._iteration_sleep: float = 0.0
 
     async def execute(
         self,
         messages: list[dict],
         tools: Optional[list[dict]] = None,
-        *,
-        max_iterations: int,
-        iteration_sleep: float,
     ) -> dict:
         """Plan and execute the agent group.
 
@@ -135,10 +147,6 @@ class AgentGroup:
             messages (list[dict]): Input conversation messages for the group.
             tools (Optional[list[dict]]): Full tool definitions available to
                 sub-agents before authorization filtering.
-            max_iterations (int): Agentic-loop ceiling for each sub-agent,
-                from the workflow config.
-            iteration_sleep (float): Inter-iteration sleep for each
-                sub-agent, from the workflow config.
 
         Returns:
             dict: Result dictionary with keys:
@@ -151,8 +159,6 @@ class AgentGroup:
             AgentExecutionError: If planner returns invalid JSON, agent count
                 violates bounds, or sub-agent execution fails.
         """
-        self._max_iterations = max_iterations
-        self._iteration_sleep = iteration_sleep
         authorized_tool_definitions = self._filter_authorized_tools(tools)
 
         group_context: dict[str, Any] = dict(self.group_config.shared_context)
@@ -584,9 +590,10 @@ class AgentGroup:
 
         Description:
             Constructs a ContextHarness from the plan's context_instructions
-            and group_context, then creates a CoreAgent and runs it.  The
-            ContextHarness gives the sub-agent scoped context built by the
-            planner rather than raw messages.
+            and group_context, registers a NodeState for the sub-agent in
+            the group state, then builds a CoreAgent and drives it to
+            completion with an AgentLoop carrying the workflow-level loop
+            control values.
 
         Params:
             plan (dict): Sub-agent plan with 'agent_id', 'task', 'focus',
@@ -630,7 +637,7 @@ class AgentGroup:
         sub_node_state = self._group_state.register_sub_agent(
             agent_id=agent_id,
             task=task_description,
-            max_iterations=self._max_iterations,
+            max_iterations=self.max_iterations,
         )
         sub_node_state.start()
 
@@ -639,16 +646,19 @@ class AgentGroup:
             label=f"{self.label} — Sub-agent {agent_index}",
             config=self.config,
             llm_provider=self.llm_provider,
-            tool_call_handler=self.tool_call_handler,
             emit_event=self.emit_event,
+        )
+        sub_agent_loop = AgentLoop(
+            agent=sub_agent,
+            tool_call_handler=self.tool_call_handler,
             node_state=sub_node_state,
+            termination_conditions=self.config.termination_conditions,
+            max_iterations=self.max_iterations,
+            iteration_sleep=self.iteration_sleep,
+            emit_event=self.emit_event,
         )
 
-        result = await sub_agent.execute(
-            sub_agent_messages, authorized_tools,
-            max_iterations=self._max_iterations,
-            iteration_sleep=self._iteration_sleep,
-        )
+        result = await sub_agent_loop.execute(sub_agent_messages, authorized_tools)
         result["agent_id"] = agent_id
         result["task"] = task_description
         return result

@@ -18,14 +18,18 @@ nodes:
     retry_waiting_time: 1.5
     termination_conditions:
     - Research plan has at least 3 investigation areas
-    max_iterations: 3
-    iteration_sleep: 0.0
     token_budget: 32768
     scope_window: 5
     tools: []
+    tool_strict: true
+    tool_choice: auto
+    parallel_tool_calls: true
     call_budget: 50
     rate_limit_per_minute: 30
     few_shot_examples: []
+    read_upstream_state: true
+    expose_downstream_state: true
+    read_orchestration_state: false
   group_config: null
   position:
     x: 300.0
@@ -46,14 +50,18 @@ nodes:
     retry_waiting_time: 1.5
     termination_conditions:
     - Analysis is complete with supporting evidence
-    max_iterations: 5
-    iteration_sleep: 0.0
     token_budget: 32768
     scope_window: 5
     tools: []
+    tool_strict: true
+    tool_choice: auto
+    parallel_tool_calls: true
     call_budget: 50
     rate_limit_per_minute: 30
     few_shot_examples: []
+    read_upstream_state: true
+    expose_downstream_state: true
+    read_orchestration_state: false
   group_config:
     max_parallel_agents: 2
     min_agents: 2
@@ -61,6 +69,7 @@ nodes:
     group_structure: parallel
     shared_context: {}
     tool_authorization: []
+    sub_agent_read_group_state: true
   position:
     x: 300.0
     y: 300.0
@@ -80,14 +89,18 @@ nodes:
     retry_waiting_time: 1.5
     termination_conditions:
     - Report includes executive summary and detailed findings
-    max_iterations: 3
-    iteration_sleep: 0.0
     token_budget: 32768
     scope_window: 5
     tools: []
+    tool_strict: true
+    tool_choice: auto
+    parallel_tool_calls: true
     call_budget: 50
     rate_limit_per_minute: 30
     few_shot_examples: []
+    read_upstream_state: true
+    expose_downstream_state: true
+    read_orchestration_state: false
   group_config: null
   position:
     x: 300.0
@@ -105,4 +118,6 @@ config:
   total_timeout: 180
   logging_level: info
   trace_enabled: true
-  dead_loop_detection: true
+  max_loop_rounds: 3
+  max_iterations: 5
+  iteration_sleep: 0.0

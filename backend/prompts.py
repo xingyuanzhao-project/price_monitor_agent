@@ -6,7 +6,7 @@ Entities:
     - PROMPTS_DIR: Resolved path to the prompts/ directory.
 
 How used by other modules:
-    - backend.agent.group calls load_prompt_template("group_planner_structured.json")
+    - backend.orchestration.group calls load_prompt_template("group_planner_structured.json")
       and load_prompt_template("group_planner_default.json"), then formats with
       runtime values ({structure}, {shared_state}, {min_agents}, {max_agents}).
 """

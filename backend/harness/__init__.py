@@ -14,9 +14,10 @@ Entities in it:
       ToolBudgetExhaustedError.
 
 How used by other modules:
-    The orchestration executor instantiates both harnesses per workflow node
-    and passes them into CoreAgent / AgentGroup.  The API layer never touches
-    harnesses directly.
+    The orchestration executor instantiates both harnesses per workflow node:
+    the ContextHarness assembles the node's messages, and the ExecutionHarness's
+    ``process_response`` is wired into the AgentLoop / AgentGroup as the
+    tool_call_handler.  The API layer never touches harnesses directly.
 """
 
 from backend.harness.context import (

@@ -211,19 +211,6 @@ class BaseTool(ABC):
         if asyncio.iscoroutine(result):
             await result
 
-    def parse_request(self, text: str) -> dict | None:
-        """Parse a natural language request into canonical tool arguments.
-
-        The tool support layer uses this for the non-native path: when the LLM
-        produced text instead of a structured tool_calls block, the tool tries
-        to extract actionable parameters from the text using keyword matching
-        or other heuristics.
-
-        Returns None if this tool cannot handle the text.
-        Subclasses override to implement source-specific parsing.
-        """
-        return None
-
     @property
     def credentials(self) -> dict[str, Any]:
         """

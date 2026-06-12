@@ -18,17 +18,18 @@ nodes:
     retry_waiting_time: 1.5
     termination_conditions:
     - When price are fetched.
-    max_iterations: 3
-    iteration_sleep: 0.0
     token_budget: 32768
     scope_window: 5
     tools: []
     tool_strict: true
-    tool_choice: required
+    tool_choice: auto
     parallel_tool_calls: true
     call_budget: 50
     rate_limit_per_minute: 30
     few_shot_examples: []
+    read_upstream_state: true
+    expose_downstream_state: true
+    read_orchestration_state: false
   group_config: null
   position:
     x: 386.1865319749262
@@ -46,8 +47,6 @@ nodes:
     retries: 2
     retry_waiting_time: 1.5
     termination_conditions: []
-    max_iterations: 10
-    iteration_sleep: 0.0
     token_budget: 32768
     scope_window: 5
     tools:
@@ -58,6 +57,9 @@ nodes:
     call_budget: 50
     rate_limit_per_minute: 30
     few_shot_examples: []
+    read_upstream_state: true
+    expose_downstream_state: true
+    read_orchestration_state: false
   group_config: null
   position:
     x: 386.5371439543984
@@ -71,4 +73,6 @@ config:
   total_timeout: 60
   logging_level: info
   trace_enabled: true
-  dead_loop_detection: true
+  max_loop_rounds: 3
+  max_iterations: 3
+  iteration_sleep: 0.0

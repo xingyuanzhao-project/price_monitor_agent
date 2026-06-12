@@ -23,7 +23,7 @@ How used by other modules:
     - schema.persistence serializes/deserializes these models to/from YAML.
     - schema.validation inspects these models for structural correctness.
     - agent.core reads NodeConfig to configure LLM calls and execution behavior.
-    - agent.group reads AgentGroupConfig to determine execution structure.
+    - orchestration.group reads AgentGroupConfig to determine execution structure.
 """
 
 from enum import Enum

@@ -11,10 +11,10 @@ Entities in it:
     - LLMProvider: Async client for LLM API interactions via OpenAI SDK.
 
 How used by other modules:
-    - backend.agent.core instantiates LLMProvider and calls complete() during
-      the agentic loop for non-streaming execution.
-    - backend.agent.group uses LLMProvider for the planner phase to decompose
-      tasks into sub-agent assignments.
+    - backend.agent.core calls complete() once per LLM turn (CoreAgent is
+      driven by backend.orchestration.agent_loop.AgentLoop).
+    - backend.orchestration.group uses LLMProvider for the planner phase to
+      decompose tasks into sub-agent assignments.
     - The orchestration engine calls list_models() to populate available models.
     - close() is called during graceful shutdown to release connections.
 """

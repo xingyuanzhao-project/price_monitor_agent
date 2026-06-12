@@ -10,7 +10,7 @@ What it does:
 
     - NodeState: Per-node state that tracks the agent's task, conversation
       history, tool call records, and iteration progress through the
-      agentic loop.  Owned by the CoreAgent during execution.
+      agentic loop.  Owned by the AgentLoop during execution.
 
     - GroupState: Per-group state shared among sub-agents within an
       AgentGroup.  Sub-agents read from it and write their outputs back
@@ -30,9 +30,10 @@ Entities in it:
 How used by other modules:
     - The orchestration executor creates one OrchestrationState per run
       and one NodeState per node.
-    - CoreAgent reads and writes its NodeState during the agentic loop.
-    - AgentGroup creates a GroupState from its config and passes it to
-      sub-agents.
+    - AgentLoop (backend.orchestration.agent_loop) reads and writes the
+      NodeState while driving the agentic loop.
+    - AgentGroup creates a GroupState from its config and registers one
+      NodeState per sub-agent in it.
 """
 
 from __future__ import annotations
@@ -59,8 +60,8 @@ class NodeStatus(str, Enum):
 class NodeState:
     """Mutable state for a single agent node during execution.
 
-    Owned by the CoreAgent.  The agent reads and writes this throughout
-    the agentic loop.  When the node finishes, the orchestration layer
+    Owned by the AgentLoop.  The loop reads and writes this throughout
+    the agentic cycle.  When the node finishes, the orchestration layer
     copies the final status into OrchestrationState.
 
     Attributes:
@@ -71,7 +72,7 @@ class NodeState:
             between the agent and the LLM (system, user, assistant,
             tool-result messages).
         tool_calls_record: Structured log of all tool calls made,
-            including type (native/non_native) and result content.
+            one entry per dispatched call with its result content.
         iteration: Current iteration number (1-indexed).
         max_iterations: Configured ceiling.
         started_at: UTC timestamp when the node began execution.

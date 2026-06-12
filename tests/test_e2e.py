@@ -349,23 +349,28 @@ async def test_explicit_self_loop_execution(workflow_executor: WorkflowExecutor)
 # ---------------------------------------------------------------------------
 # Test 4b: Three-layer completion + workflow-level iteration budget
 #
-# Deterministic (no network): a stub provider that *always* emits a tool
-# call, so the agent never stops on its own (layer 2 never fires). This
-# isolates the loop bound (workflow max_iterations) and the declarative
-# termination layer (layer 3).
+# Deterministic full-stack runs: the schema goes through the real
+# validator, scheduler, executor, node state registration, context and
+# execution harnesses, tool registry, and the real chunk_text tool.
+# Only the LLM HTTP boundary is replaced — with a scripted provider that
+# *always* emits a tool call, so the agent never stops on its own
+# (layer 2 never fires).  This isolates the loop bound (workflow
+# max_iterations) and the declarative termination layer (layer 3) while
+# every orchestration layer in between runs for real.
 # ---------------------------------------------------------------------------
 
 
 class _AlwaysToolCallProvider:
-    """Stub LLMProvider that emits one native tool call every turn."""
+    """Stub LLMProvider that emits one native chunk_text call every turn."""
 
-    def __init__(self, tool_result: str) -> None:
-        self.tool_result = tool_result
+    def __init__(self, chunk_payload: str) -> None:
+        self.chunk_payload = chunk_payload
         self.calls = 0
 
     async def complete(self, *, messages, tools=None, response_format=None,
                        tool_choice=None, parallel_tool_calls=None) -> dict:
         self.calls += 1
+        import json as _json
         return {
             "choices": [{
                 "message": {
@@ -374,7 +379,10 @@ class _AlwaysToolCallProvider:
                     "tool_calls": [{
                         "id": f"call_{self.calls}",
                         "type": "function",
-                        "function": {"name": "probe", "arguments": "{}"},
+                        "function": {
+                            "name": "chunk_text",
+                            "arguments": _json.dumps({"text": self.chunk_payload}),
+                        },
                     }],
                 },
                 "finish_reason": "tool_calls",
@@ -382,74 +390,143 @@ class _AlwaysToolCallProvider:
         }
 
 
-def _make_core_agent(provider, conditions, tool_result):
-    from backend.agent.core import CoreAgent
-    from backend.state import NodeState
-
-    async def handler(assistant_message):
-        return [{
-            "role": "tool",
-            "tool_call_id": assistant_message["tool_calls"][0]["id"],
-            "content": tool_result,
-        }]
-
-    node_state = NodeState(node_id="probe_agent", task="probe")
-    node_state.start()
-    agent = CoreAgent(
-        node_id="probe_agent",
-        label="Probe",
-        config=NodeConfig(model_id=TEST_MODEL_ID, termination_conditions=conditions),
-        llm_provider=provider,
-        tool_call_handler=handler,
-        node_state=node_state,
+def _make_looping_tool_schema(
+    termination_conditions: list[str],
+    max_iterations: int,
+) -> WorkflowSchema:
+    """Agent bound to a chunk_text TOOL node via a TOOL_CALL edge."""
+    return WorkflowSchema(
+        schema_id="test_loop_control",
+        name="Loop Control Test",
+        description="Agent that keeps calling a tool until stopped by orchestration.",
+        nodes=[
+            NodeDefinition(
+                node_id="loop_agent",
+                node_type=NodeType.AGENT,
+                label="Chunk the payload",
+                config=NodeConfig(
+                    model_id=TEST_MODEL_ID,
+                    termination_conditions=termination_conditions,
+                ),
+                position=NodePosition(x=100, y=100),
+            ),
+            NodeDefinition(
+                node_id="chunk_tool",
+                node_type=NodeType.TOOL,
+                label="Chunker",
+                config=NodeConfig(model_id="", tools=["chunk_text"]),
+                position=NodePosition(x=100, y=300),
+            ),
+        ],
+        edges=[
+            EdgeDefinition(
+                edge_id="agent_to_tool",
+                edge_type=EdgeType.TOOL_CALL,
+                source_node_id="loop_agent",
+                target_node_id="chunk_tool",
+            ),
+        ],
+        config=WorkflowConfig(total_timeout=60, max_iterations=max_iterations),
     )
-    return agent
 
 
 @pytest.mark.asyncio
-async def test_declarative_termination_stops_loop_early():
-    """Layer 3: when the agent never stops on its own but a declarative
-    termination condition is matched in the accumulated output, the loop
-    terminates before exhausting the iteration budget."""
-    provider = _AlwaysToolCallProvider(tool_result="RSI computed: 71.4 (analysis complete)")
-    agent = _make_core_agent(provider, ["analysis complete"], provider.tool_result)
-
-    result = await agent.execute(
-        [{"role": "user", "content": "probe"}],
-        tools=[{"type": "function", "function": {"name": "probe", "parameters": {}}}],
-        max_iterations=10,
-        iteration_sleep=0,
+async def test_declarative_termination_stops_loop_early(
+    workflow_executor: WorkflowExecutor, monkeypatch: pytest.MonkeyPatch,
+):
+    """Layer 3, full stack: the scripted LLM never stops on its own, but the
+    declarative termination condition matches the real chunk_text output, so
+    the AgentLoop terminates after iteration 1 instead of exhausting the
+    10-iteration budget."""
+    provider = _AlwaysToolCallProvider(
+        chunk_payload="RSI computed: 71.4 (analysis complete)"
+    )
+    monkeypatch.setattr(
+        workflow_executor, "_resolve_llm_provider", lambda **kwargs: provider,
     )
 
-    assert result["iterations"] == 1, (
+    schema = _make_looping_tool_schema(
+        termination_conditions=["analysis complete"], max_iterations=10,
+    )
+    record = await workflow_executor.execute_workflow(schema)
+
+    assert record.status == "completed", (
+        f"Expected completed, got {record.status}. Errors: {record.errors}"
+    )
+    agent_output = record.node_outputs["loop_agent"]
+    assert agent_output["iterations"] == 1, (
         f"Declarative termination should stop after iteration 1, "
-        f"got {result['iterations']}"
+        f"got {agent_output['iterations']}"
     )
     assert provider.calls == 1
-    assert "analysis complete" in result["content"]
+    assert "analysis complete" in agent_output["content"]
+    # The TOOL node's output must be published for downstream data flow.
+    assert "chunk_tool" in record.node_outputs
+    assert "chunk_text(" in record.node_outputs["chunk_tool"]
+    # The trace must show the satisfied termination verdict.
+    completion_checks = [e for e in record.events if e["type"] == "completion_check"]
+    assert completion_checks, "No completion_check events traced"
+    assert completion_checks[-1]["termination"]["satisfied"] is True
 
 
 @pytest.mark.asyncio
-async def test_workflow_iteration_budget_enforced():
-    """The loop bound is the workflow-level max_iterations: an agent that
-    never declares done and has no satisfiable termination condition runs
-    exactly max_iterations times, then fails."""
-    from backend.agent.core import AgentExecutionError
+async def test_workflow_iteration_budget_enforced(
+    workflow_executor: WorkflowExecutor, monkeypatch: pytest.MonkeyPatch,
+):
+    """Full stack: an agent that never declares done and has no satisfiable
+    termination condition runs exactly the workflow-level max_iterations
+    times, then the run fails with the budget error surfaced — not papered
+    over."""
+    provider = _AlwaysToolCallProvider(chunk_payload="partial data")
+    monkeypatch.setattr(
+        workflow_executor, "_resolve_llm_provider", lambda **kwargs: provider,
+    )
 
-    provider = _AlwaysToolCallProvider(tool_result="partial data")
-    agent = _make_core_agent(provider, ["never appears in output"], provider.tool_result)
+    schema = _make_looping_tool_schema(
+        termination_conditions=["never appears in output"], max_iterations=4,
+    )
+    record = await workflow_executor.execute_workflow(schema)
 
-    with pytest.raises(AgentExecutionError) as exc_info:
-        await agent.execute(
-            [{"role": "user", "content": "probe"}],
-            tools=[{"type": "function", "function": {"name": "probe", "parameters": {}}}],
-            max_iterations=4,
-            iteration_sleep=0,
-        )
-
-    assert exc_info.value.iterations_completed == 4
+    assert record.status == "failed", (
+        f"Budget exhaustion must fail the run, got {record.status}"
+    )
     assert provider.calls == 4
-    assert "Maximum iterations (4)" in str(exc_info.value)
+    assert any("Maximum iterations (4)" in error for error in record.errors), (
+        f"Budget error not surfaced in record.errors: {record.errors}"
+    )
+    iteration_events = [e for e in record.events if e["type"] == "iteration_started"]
+    assert len(iteration_events) == 4
+
+
+# ---------------------------------------------------------------------------
+# Test 4c: simple_price_check.yaml from disk — TRUE end-to-end
+#
+# Reads the same YAML file the GUI runs (schemas/simple_price_check.yaml)
+# through SchemaPersistence, executes it with the real provider resolution
+# (OpenRouter, the model declared in the file), the real OKX fetch, and the
+# real AgentLoop — schema reading to final output, no layer skipped.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_simple_price_check_yaml_from_disk(workflow_executor: WorkflowExecutor):
+    persistence = SchemaPersistence(Path("schemas"))
+    schema = persistence.load_schema("simple_price_check")
+    record = await workflow_executor.execute_workflow(schema)
+
+    assert record.status == "completed", (
+        f"Expected completed, got {record.status}. Errors: {record.errors}"
+    )
+    analyst_output = record.node_outputs["analyst"]
+    assert len(analyst_output["content"]) > 10, (
+        f"Expected a market summary, got: {analyst_output['content']!r}"
+    )
+    assert analyst_output["iterations"] <= schema.config.max_iterations
+    # The agent must actually have fetched through the bound TOOL node.
+    assert "tool-2cddf4fe" in record.node_outputs, (
+        "TOOL node output missing — the agent never called fetch_exchange_data"
+    )
+    assert "fetch_exchange_data(" in record.node_outputs["tool-2cddf4fe"]
 
 
 # ---------------------------------------------------------------------------
@@ -835,11 +912,11 @@ async def test_fullstack_fetch_exchange_data(workflow_executor: WorkflowExecutor
 
     WorkflowExecutor.execute_workflow
       → _execute_stages → _execute_node
-        → LLMProvider.complete  (real API call)
-        → CoreAgent parses response (tool_calls extraction)
-        → ExecutionHarness.process_response (authorization, dispatch)
-        → FetchExchangeDataTool.execute (real API call)
-        → result flows back through harness → agent → executor
+        → AgentLoop.execute (round-trip driver)
+          → CoreAgent.execute_turn → LLMProvider.complete (real API call)
+          → ExecutionHarness.process_response (authorization, dispatch)
+          → FetchExchangeDataTool.execute (real API call)
+        → result flows back through harness → loop → executor
 
     Captures ALL events and asserts each layer fired.
     """

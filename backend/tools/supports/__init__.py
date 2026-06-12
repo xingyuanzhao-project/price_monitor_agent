@@ -151,8 +151,6 @@ Follow these steps when adding a new data source.
    d. Add the source_id to the appropriate list in ``SOURCE_CATEGORIES``
       (``"exchange"``, ``"macro"``, ``"news"``, or ``"social"``).
 
-   e. Add aliases to ``_SOURCE_ALIASES`` for natural-language parsing.
-
 5. STANDARDS TO RESPECT
    ~~~~~~~~~~~~~~~~~~~~~~
    - Modules must be pure: no ``import httpx``, no ``async``, no I/O.

@@ -18,8 +18,10 @@ What it does:
     Per executable node the executor resolves an LLM provider, builds
     context and execution harnesses from NodeConfig fields with
     global_defaults as fallback, assembles messages, enforces
-    input/output guardrails, injects upstream data, and invokes either
-    a CoreAgent or an AgentGroup.  The full run is wrapped in a
+    input/output guardrails, injects upstream data, and then drives the
+    node: an AGENT node runs as a CoreAgent inside an AgentLoop, an
+    AGENT_GROUP node runs as an AgentGroup (whose sub-agents each run
+    inside their own AgentLoop).  The full run is wrapped in a
     total-timeout guard and every significant event is streamed via an
     optional callback.
 
@@ -28,6 +30,8 @@ What it does:
         - logging_level: gates which events are emitted
         - trace_enabled: when False, node_output events are suppressed
         - max_loop_rounds: bounds every explicit loop's round count
+        - max_iterations: agentic-loop ceiling passed to every AgentLoop
+        - iteration_sleep: inter-iteration pacing passed to every AgentLoop
 
 Entities in it:
     - RunRecord: dataclass capturing the full state of a single run.
@@ -49,11 +53,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from backend.agent.core import CoreAgent, AgentExecutionError
-from backend.agent.group import AgentGroup
+from backend.agent.core import CoreAgent
 from backend.agent.llm_provider import LLMProvider
 from backend.harness.context import ContextHarness
 from backend.harness.execution import ExecutionHarness
+from backend.orchestration.agent_loop import AgentExecutionError, AgentLoop
+from backend.orchestration.group import AgentGroup
 from backend.orchestration.scheduler import ExecutionPlan, ExecutionScheduler, ExecutionUnit
 from backend.schema.models import LoggingLevel, NodeDefinition, NodeType, WorkflowSchema
 from backend.schema.validation import SchemaValidator, SchemaValidationError
@@ -473,6 +478,8 @@ class WorkflowExecutor:
             record: The mutable RunRecord (for node_outputs and run_id).
             node_map: All schema nodes keyed by node_id.
             emit: Event emitter coroutine.
+            max_iterations: Agentic-loop ceiling, from the workflow config.
+            iteration_sleep: Inter-iteration sleep, from the workflow config.
 
         Returns:
             The node's execution output.
@@ -618,26 +625,29 @@ class WorkflowExecutor:
                 group_config=node.group_config,
                 llm_provider=llm_provider,
                 tool_call_handler=execution_harness.process_response,
+                max_iterations=max_iterations,
+                iteration_sleep=iteration_sleep,
                 emit_event=agent_emit_event,
             )
-            agent_result = await group.execute(
-                messages, tools=tool_definitions,
-                max_iterations=max_iterations, iteration_sleep=iteration_sleep,
-            )
+            agent_result = await group.execute(messages, tools=tool_definitions)
         else:
             agent = CoreAgent(
                 node_id=node.node_id,
                 label=node.label,
                 config=node.config,
                 llm_provider=llm_provider,
-                tool_call_handler=execution_harness.process_response,
                 emit_event=agent_emit_event,
+            )
+            agent_loop = AgentLoop(
+                agent=agent,
+                tool_call_handler=execution_harness.process_response,
                 node_state=node_state,
+                termination_conditions=node.config.termination_conditions,
+                max_iterations=max_iterations,
+                iteration_sleep=iteration_sleep,
+                emit_event=agent_emit_event,
             )
-            agent_result = await agent.execute(
-                messages, tools=tool_definitions,
-                max_iterations=max_iterations, iteration_sleep=iteration_sleep,
-            )
+            agent_result = await agent_loop.execute(messages, tools=tool_definitions)
 
         output_text = agent_result.get("content", str(agent_result))
         result = agent_result
